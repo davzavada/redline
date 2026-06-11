@@ -1,6 +1,7 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { X, Table, Copy, Check } from 'lucide-react';
 import { Document, DiffSegment, ChangeType } from '../types';
+import { escapeHtml } from '../utils/html';
 
 interface ExportModalProps {
   isOpen: boolean;
@@ -25,10 +26,20 @@ const ExportModal: React.FC<ExportModalProps> = ({
   const [copied, setCopied] = useState(false);
   const redlineTextPlain = segments.map(s => s.text).join('');
 
+  // Close on Escape
+  useEffect(() => {
+    if (!isOpen) return;
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') onClose();
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [isOpen, onClose]);
+
   const getSegmentHtml = (s: DiffSegment) => {
-    if (s.type === ChangeType.ADDED) return `<span style="color: #3b82f6; text-decoration: underline;">${s.text}</span>`;
-    if (s.type === ChangeType.REMOVED) return `<span style="color: #ef4444; text-decoration: line-through;">${s.text}</span>`;
-    return s.text;
+    if (s.type === ChangeType.ADDED) return `<span style="color: #3b82f6; text-decoration: underline;">${escapeHtml(s.text)}</span>`;
+    if (s.type === ChangeType.REMOVED) return `<span style="color: #ef4444; text-decoration: line-through;">${escapeHtml(s.text)}</span>`;
+    return escapeHtml(s.text);
   };
 
   const handleCopyTable = () => {
@@ -38,15 +49,15 @@ const ExportModal: React.FC<ExportModalProps> = ({
       <table border="1" style="border-collapse: collapse; font-family: Arial, sans-serif; font-size: 10pt;">
         <thead>
           <tr>
-            <th style="padding: 8px; text-align: left; background-color: #eeeeee;">${sourceDoc.name}</th>
-            <th style="padding: 8px; text-align: left; background-color: #eeeeee;">${targetDoc.name}</th>
+            <th style="padding: 8px; text-align: left; background-color: #eeeeee;">${escapeHtml(sourceDoc.name)}</th>
+            <th style="padding: 8px; text-align: left; background-color: #eeeeee;">${escapeHtml(targetDoc.name)}</th>
             <th style="padding: 8px; text-align: left; background-color: #eeeeee;">Redline</th>
           </tr>
         </thead>
         <tbody>
           <tr>
-            <td style="padding: 8px; vertical-align: top; white-space: pre-wrap;">${sourceDoc.text}</td>
-            <td style="padding: 8px; vertical-align: top; white-space: pre-wrap;">${targetDoc.text}</td>
+            <td style="padding: 8px; vertical-align: top; white-space: pre-wrap;">${escapeHtml(sourceDoc.text)}</td>
+            <td style="padding: 8px; vertical-align: top; white-space: pre-wrap;">${escapeHtml(targetDoc.text)}</td>
             <td style="padding: 8px; vertical-align: top; white-space: pre-wrap;">${redlineHtml}</td>
           </tr>
         </tbody>
@@ -127,7 +138,7 @@ const ExportModal: React.FC<ExportModalProps> = ({
               {copied ? (
                 <>
                   <Check className="w-4 h-4" />
-                  Kopírovat
+                  Zkopírováno
                 </>
               ) : (
                 <>
