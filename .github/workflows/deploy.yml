@@ -32,8 +32,6 @@ jobs:
         run: npm ci
 
       - name: Build
-        env:
-          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
         run: npm run build
 
       # Vite builds to dist/index.html; carry the custom-domain CNAME along.
