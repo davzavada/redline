@@ -15,14 +15,3 @@ export interface DiffSegment {
   text: string;
   type: ChangeType;
 }
-
-export interface AnalysisResponse {
-  summary: string;
-  risks: string[];
-  formattingIssues: string[];
-}
-
-export enum ViewMode {
-  EDIT = 'EDIT', // Now the only mode, effectively
-  REDLINE = 'REDLINE'
-}

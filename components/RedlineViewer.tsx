@@ -1,6 +1,7 @@
-import React from 'react';
+import React, { useState } from 'react';
 import { ChangeType, DiffSegment } from '../types';
-import { Copy, Table } from 'lucide-react';
+import { Check, Copy, Table } from 'lucide-react';
+import { escapeHtml } from '../utils/html';
 
 interface RedlineViewerProps {
   segments: DiffSegment[];
@@ -16,6 +17,8 @@ interface RedlineViewerProps {
 }
 
 const RedlineViewer: React.FC<RedlineViewerProps> = ({ segments, scrollRef, onScroll, onOpenExport, settings }) => {
+  const [copied, setCopied] = useState(false);
+
   const handleCopyRedline = async () => {
     const plainText = segments.map(s => {
       if (s.type === ChangeType.ADDED) return `[+${s.text}+]`;
@@ -24,11 +27,11 @@ const RedlineViewer: React.FC<RedlineViewerProps> = ({ segments, scrollRef, onSc
     }).join('');
 
     const htmlText = `<div style="font-family: Arial, sans-serif; font-size: 10pt; white-space: pre-wrap;">${segments.map(s => {
-      if (s.type === ChangeType.ADDED) return `<span style="color: #3b82f6; text-decoration: underline;">${s.text}</span>`;
-      if (s.type === ChangeType.REMOVED) return `<span style="color: #ef4444; text-decoration: line-through;">${s.text}</span>`;
-      return s.text;
+      if (s.type === ChangeType.ADDED) return `<span style="color: #3b82f6; text-decoration: underline;">${escapeHtml(s.text)}</span>`;
+      if (s.type === ChangeType.REMOVED) return `<span style="color: #ef4444; text-decoration: line-through;">${escapeHtml(s.text)}</span>`;
+      return escapeHtml(s.text);
     }).join('')}</div>`;
-    
+
     try {
       const blobHtml = new Blob([htmlText], { type: 'text/html' });
       const blobPlain = new Blob([plainText], { type: 'text/plain' });
@@ -38,11 +41,11 @@ const RedlineViewer: React.FC<RedlineViewerProps> = ({ segments, scrollRef, onSc
           'text/plain': blobPlain
         })
       ]);
-      console.log('Redline zkopírován do schránky s formátováním.');
     } catch (e) {
       navigator.clipboard.writeText(plainText);
-      console.log('Redline zkopírován pouze jako prostý text.');
     }
+    setCopied(true);
+    setTimeout(() => setCopied(false), 2000);
   };
 
   if (segments.length === 0) {
@@ -53,8 +56,15 @@ const RedlineViewer: React.FC<RedlineViewerProps> = ({ segments, scrollRef, onSc
     );
   }
 
-  const themeBg = settings.theme === 'dark' ? 'bg-slate-950' : 'bg-white';
-  const textMain = settings.theme === 'dark' ? 'text-slate-200' : 'text-slate-800';
+  const isDark = settings.theme === 'dark';
+  const themeBg = isDark ? 'bg-slate-950' : 'bg-white';
+  const textMain = isDark ? 'text-slate-200' : 'text-slate-800';
+  const addedClass = isDark
+    ? 'bg-blue-500/20 text-blue-300 underline decoration-blue-500/60 decoration-2 underline-offset-2 mx-0.5 rounded-sm px-0.5'
+    : 'bg-blue-100 text-blue-700 underline decoration-blue-300 decoration-2 underline-offset-2 mx-0.5 rounded-sm px-0.5';
+  const removedClass = isDark
+    ? 'bg-red-500/10 text-red-400 line-through decoration-red-500/50 decoration-2 mx-0.5 opacity-80'
+    : 'bg-red-50 text-red-600 line-through decoration-red-400/50 decoration-2 mx-0.5 opacity-80';
 
   return (
     <div className={`flex flex-col h-full relative ${themeBg}`}>
@@ -68,9 +78,9 @@ const RedlineViewer: React.FC<RedlineViewerProps> = ({ segments, scrollRef, onSc
           switch (segment.type) {
             case ChangeType.ADDED:
               return (
-                <span 
-                  key={segment.id} 
-                  className="bg-blue-100 text-blue-700 underline decoration-blue-300 decoration-2 underline-offset-2 mx-0.5 rounded-sm px-0.5"
+                <span
+                  key={segment.id}
+                  className={addedClass}
                   id={segment.id}
                 >
                   {segment.text}
@@ -78,9 +88,9 @@ const RedlineViewer: React.FC<RedlineViewerProps> = ({ segments, scrollRef, onSc
               );
             case ChangeType.REMOVED:
               return (
-                <span 
-                  key={segment.id} 
-                  className="bg-red-50 text-red-600 line-through decoration-red-400/50 decoration-2 mx-0.5 opacity-80"
+                <span
+                  key={segment.id}
+                  className={removedClass}
                   id={segment.id}
                 >
                   {segment.text}
@@ -101,12 +111,12 @@ const RedlineViewer: React.FC<RedlineViewerProps> = ({ segments, scrollRef, onSc
           <Table className="w-4 h-4" />
           Tabulka
         </button>
-        <button 
+        <button
           onClick={handleCopyRedline}
-          className="bg-blue-600 text-white p-2 rounded-full shadow-lg hover:bg-blue-500 transition-colors flex items-center gap-2 px-4 text-xs font-bold ring-2 ring-white/20"
+          className={`${copied ? 'bg-emerald-600 hover:bg-emerald-500' : 'bg-blue-600 hover:bg-blue-500'} text-white p-2 rounded-full shadow-lg transition-colors flex items-center gap-2 px-4 text-xs font-bold ring-2 ring-white/20`}
         >
-          <Copy className="w-4 h-4" />
-          Kopírovat
+          {copied ? <Check className="w-4 h-4" /> : <Copy className="w-4 h-4" />}
+          {copied ? 'Zkopírováno' : 'Kopírovat'}
         </button>
       </div>
     </div>
