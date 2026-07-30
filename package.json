@@ -6,6 +6,7 @@
   "scripts": {
     "dev": "vite",
     "build": "vite build",
+    "build:single": "vite build --mode single",
     "preview": "vite preview",
     "lint": "tsc --noEmit",
     "test": "vitest run"
@@ -13,8 +14,10 @@
   "dependencies": {
     "@tailwindcss/vite": "^4.0.0-beta.8",
     "diff": "^8.0.2",
+    "fflate": "^0.8.3",
     "lucide-react": "^1.7.0",
     "motion": "^12.38.0",
+    "pdfjs-dist": "^6.2.108",
     "react": "^19.2.3",
     "react-dom": "^19.2.3",
     "tailwindcss": "^4.0.0-beta.8",

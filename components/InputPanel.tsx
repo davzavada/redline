@@ -1,7 +1,19 @@
-import React, { useState } from 'react';
+import React, { useRef, useState } from 'react';
 import { Document } from '../types';
+import { ACCEPTED_FILE_TYPES, ACCEPTED_HINT, readDocumentFile } from '../utils/fileText';
 
-const TEXT_FILE_RE = /\.(txt|md|markdown|csv|json|xml|html?|rtf)$/i;
+/**
+ * Lets the browser paint before we start parsing. A PDF is parsed on this thread
+ * (see utils/pdfText.ts), so without this the "Načítám…" state would never show.
+ */
+const yieldToPaint = () =>
+  new Promise<void>(resolve => {
+    if (typeof requestAnimationFrame !== 'function') {
+      setTimeout(resolve, 0);
+      return;
+    }
+    requestAnimationFrame(() => requestAnimationFrame(() => resolve()));
+  });
 
 interface InputPanelProps {
   label: string;
@@ -43,24 +55,36 @@ const InputPanel: React.FC<InputPanelProps> = ({
   const [editingId, setEditingId] = useState<string | null>(null);
   const [tempName, setTempName] = useState('');
   const [isDragging, setIsDragging] = useState(false);
+  const [importing, setImporting] = useState<string | null>(null);
+  const [importError, setImportError] = useState<string | null>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
 
-  const handleDrop = async (e: React.DragEvent) => {
+  const importFile = async (file: File | undefined | null) => {
+    // One at a time: a second drop mid-parse would race the first to the panel.
+    if (!file || !selectedDoc || importing) return;
+    setImportError(null);
+    setImporting(file.name);
+    try {
+      await yieldToPaint();
+      const { text, name } = await readDocumentFile(file);
+      onChangeText(selectedDoc.id, text);
+      if (name) onRenameDoc(selectedDoc.id, name);
+    } catch (error) {
+      // readDocumentFile phrases its failures for the reader; anything else is a
+      // bug and should still say something useful rather than nothing.
+      setImportError(
+        error instanceof Error ? error.message : 'Soubor se nepodařilo přečíst.'
+      );
+      if (!(error instanceof Error)) console.error('Failed to import file', error);
+    } finally {
+      setImporting(null);
+    }
+  };
+
+  const handleDrop = (e: React.DragEvent) => {
     e.preventDefault();
     setIsDragging(false);
-    const file = e.dataTransfer.files?.[0];
-    if (!file || !selectedDoc) return;
-    if (!(file.type.startsWith('text/') || TEXT_FILE_RE.test(file.name))) {
-      alert('Podporovány jsou pouze textové soubory (.txt, .md, .csv…).');
-      return;
-    }
-    try {
-      const text = await file.text();
-      onChangeText(selectedDoc.id, text);
-      const baseName = file.name.replace(/\.[^.]+$/, '').trim();
-      if (baseName) onRenameDoc(selectedDoc.id, baseName);
-    } catch (err) {
-      console.error('Failed to read dropped file', err);
-    }
+    void importFile(e.dataTransfer.files?.[0]);
   };
 
   const startEditing = (id: string, currentName: string) => {
@@ -183,38 +207,93 @@ const InputPanel: React.FC<InputPanelProps> = ({
           style={{ fontSize: `${settings.fontSize}px` }}
           value={selectedDoc?.text || ''}
           onChange={(e) => selectedDoc && onChangeText(selectedDoc.id, e.target.value)}
-          placeholder="Vložte text, nebo sem přetáhněte textový soubor…"
+          placeholder={`Vložte text, nebo sem přetáhněte soubor — ${ACCEPTED_HINT}…`}
           spellCheck={false}
         />
 
         {/* Drop zone hint */}
         {isDragging && (
-          <div className={`absolute inset-2 z-20 flex items-center justify-center rounded-lg border-2 border-dashed border-blue-400 pointer-events-none ${
+          <div className={`absolute inset-2 z-20 flex flex-col items-center justify-center gap-1 rounded-lg border-2 border-dashed border-blue-400 pointer-events-none ${
             isDark ? 'bg-slate-950/80 text-blue-300' : 'bg-blue-50/80 text-blue-600'
           }`}>
             <span className="text-xs font-bold uppercase tracking-wider">Pusťte soubor pro načtení</span>
+            <span className="text-[10px] opacity-70">{ACCEPTED_HINT}</span>
           </div>
         )}
 
-        {/* Clear Text Button - Floating Bottom Right to avoid collision with text start */}
-        <button
-           onClick={() => selectedDoc && onChangeText(selectedDoc.id, '')}
-           className={`absolute bottom-2 right-2 p-1.5 backdrop-blur-sm border rounded-md transition-all opacity-0 group-hover:opacity-100 shadow-sm z-10 ${
-             isDark
-               ? 'bg-slate-900/90 border-slate-700 text-slate-500 hover:text-red-400 hover:border-red-900'
-               : 'bg-white/90 border-slate-200 text-slate-400 hover:text-red-500 hover:border-red-200'
-           }`}
-           title="Vymazat text"
-         >
-           <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" /></svg>
-        </button>
+        {/* Parsing happens on this thread, so say what is going on before it starts. */}
+        {importing && (
+          <div className={`absolute inset-0 z-30 flex flex-col items-center justify-center gap-2 ${
+            isDark ? 'bg-slate-950/90 text-slate-300' : 'bg-white/90 text-slate-500'
+          }`}>
+            <svg className="w-5 h-5 animate-spin text-blue-500" fill="none" viewBox="0 0 24 24">
+              <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+              <path className="opacity-90" fill="currentColor" d="M4 12a8 8 0 018-8v4a4 4 0 00-4 4H4z" />
+            </svg>
+            <span className="text-xs font-medium">Načítám {importing}…</span>
+          </div>
+        )}
+
+        <input
+          ref={fileInputRef}
+          type="file"
+          accept={ACCEPTED_FILE_TYPES}
+          className="hidden"
+          onChange={(e) => {
+            void importFile(e.target.files?.[0]);
+            // Reset, so picking the same file twice in a row still fires.
+            e.target.value = '';
+          }}
+        />
+
+        {/* Floating actions - bottom right, clear of where the text starts */}
+        <div className="absolute bottom-2 right-2 flex gap-1 z-10">
+          <button
+            onClick={() => fileInputRef.current?.click()}
+            className={`p-1.5 backdrop-blur-sm border rounded-md transition-all opacity-0 group-hover:opacity-100 shadow-sm ${
+              isDark
+                ? 'bg-slate-900/90 border-slate-700 text-slate-500 hover:text-blue-400 hover:border-blue-900'
+                : 'bg-white/90 border-slate-200 text-slate-400 hover:text-blue-500 hover:border-blue-200'
+            }`}
+            title={`Načíst soubor — ${ACCEPTED_HINT}`}
+          >
+            <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 10v6m0 0l-2-2m2 2l2-2M7 18H5a2 2 0 01-2-2V6a2 2 0 012-2h5l2 2h7a2 2 0 012 2v8a2 2 0 01-2 2h-2" /></svg>
+          </button>
+          <button
+             onClick={() => selectedDoc && onChangeText(selectedDoc.id, '')}
+             className={`p-1.5 backdrop-blur-sm border rounded-md transition-all opacity-0 group-hover:opacity-100 shadow-sm ${
+               isDark
+                 ? 'bg-slate-900/90 border-slate-700 text-slate-500 hover:text-red-400 hover:border-red-900'
+                 : 'bg-white/90 border-slate-200 text-slate-400 hover:text-red-500 hover:border-red-200'
+             }`}
+             title="Vymazat text"
+           >
+             <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" /></svg>
+          </button>
+        </div>
       </div>
       
-       <div className={`px-3 h-[24px] border-t text-[9px] flex justify-between items-center ${
-         settings.theme === 'dark' ? 'bg-slate-900 border-slate-800 text-slate-500' : 'bg-white border-slate-100 text-slate-400'
+       <div className={`px-3 h-[24px] border-t text-[9px] flex justify-between items-center gap-3 ${
+         importError
+           ? (isDark ? 'bg-red-950/50 border-red-900 text-red-300' : 'bg-red-50 border-red-100 text-red-600')
+           : (isDark ? 'bg-slate-900 border-slate-800 text-slate-500' : 'bg-white border-slate-100 text-slate-400')
        }`}>
-             <span>{selectedDoc?.text.split(/\s+/).filter(x => x).length || 0} slov</span>
-             <span>{selectedDoc?.text.length || 0} znaků</span>
+             {importError ? (
+               <>
+                 <span className="truncate" title={importError}>{importError}</span>
+                 <button
+                   onClick={() => setImportError(null)}
+                   className="shrink-0 font-bold uppercase tracking-wide hover:underline"
+                 >
+                   Zavřít
+                 </button>
+               </>
+             ) : (
+               <>
+                 <span>{selectedDoc?.text.split(/\s+/).filter(x => x).length || 0} slov</span>
+                 <span>{selectedDoc?.text.length || 0} znaků</span>
+               </>
+             )}
        </div>
     </div>
   );
