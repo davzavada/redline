@@ -3,7 +3,7 @@ import { Document, DiffSegment, ChangeType } from './types';
 import InputPanel from './components/InputPanel';
 import RedlineViewer from './components/RedlineViewer';
 import ExportModal from './components/ExportModal';
-import { generateSmartDiff } from './utils/diffEngine';
+import { DiffStats, generateSmartDiff, summarizeDiff } from './utils/diffEngine';
 import { Settings as SettingsIcon } from 'lucide-react';
 
 const DEMO_ORIGINAL = `Příliš žluťoučký kůň úpěl ďábelské ódy.`;
@@ -69,6 +69,13 @@ const App: React.FC = () => {
     return id && savedWorkspace!.documents.some(d => d.id === id) ? id : (savedWorkspace?.documents[1]?.id ?? '2');
   });
   const [diffSegments, setDiffSegments] = useState<DiffSegment[]>([]);
+  const [diffStats, setDiffStats] = useState<DiffStats>({
+    added: 0,
+    removed: 0,
+    caseChanged: 0,
+    total: 0,
+    formattingOnly: false,
+  });
 
   // Navigation State
   const [activeChangeIndex, setActiveChangeIndex] = useState(-1);
@@ -173,6 +180,7 @@ const App: React.FC = () => {
 
         const segments = generateSmartDiff(t1, t2);
         setDiffSegments(segments);
+        setDiffStats(summarizeDiff(segments, t1, t2));
         setActiveChangeIndex(-1);
       }
     }, 200);
@@ -250,7 +258,7 @@ const App: React.FC = () => {
     };
     window.addEventListener('keydown', onKeyDown);
     return () => window.removeEventListener('keydown', onKeyDown);
-  });
+  }, [diffSegments, activeChangeIndex]);
 
   const handleAddDocument = () => {
     if (documents.length >= 8) return;
@@ -280,9 +288,7 @@ const App: React.FC = () => {
     if (rightDocId === id) setRightDocId(remaining[1]?.id || remaining[0].id);
   };
 
-  const addedCount = diffSegments.filter(s => s.type === ChangeType.ADDED).length;
-  const removedCount = diffSegments.filter(s => s.type === ChangeType.REMOVED).length;
-  const changesCount = addedCount + removedCount;
+  const { added: addedCount, removed: removedCount, caseChanged: caseCount, total: changesCount } = diffStats;
 
   const fontClasses = {
     sans: 'font-sans',
@@ -481,9 +487,12 @@ const App: React.FC = () => {
                      <div className="flex gap-3 text-[9px] font-bold uppercase tracking-tight">
                         <div className="flex items-center gap-1"><span className="w-1.5 h-1.5 rounded-full bg-blue-500"></span><span className="text-slate-500">Přidáno · {addedCount}</span></div>
                         <div className="flex items-center gap-1"><span className="w-1.5 h-1.5 rounded-full bg-red-400"></span><span className="text-slate-500">Smazáno · {removedCount}</span></div>
+                        <div className="flex items-center gap-1" title="Stejné slovo, jiná velikost písmen — pouze podtrženo"><span className="w-1.5 h-1.5 rounded-full bg-amber-400"></span><span className="text-slate-500">Velikost · {caseCount}</span></div>
                      </div>
                      <span className="text-[10px] text-slate-400 italic">
-                        {changesCount === 0 ? 'Beze změn' : `${changesCount} ${plural(changesCount, 'úprava', 'úpravy', 'úprav')}`}
+                        {changesCount === 0
+                          ? (diffStats.formattingOnly ? 'Beze změn · jen formátování' : 'Beze změn')
+                          : `${changesCount} ${plural(changesCount, 'úprava', 'úpravy', 'úprav')}`}
                      </span>
                   </div>
                 </div>

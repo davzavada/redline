@@ -23,12 +23,16 @@ const RedlineViewer: React.FC<RedlineViewerProps> = ({ segments, scrollRef, onSc
     const plainText = segments.map(s => {
       if (s.type === ChangeType.ADDED) return `[+${s.text}+]`;
       if (s.type === ChangeType.REMOVED) return `[-${s.text}-]`;
+      if (s.type === ChangeType.CASE_CHANGED) return `[~${s.text}~]`;
       return s.text;
     }).join('');
 
     const htmlText = `<div style="font-family: Arial, sans-serif; font-size: 10pt; white-space: pre-wrap;">${segments.map(s => {
       if (s.type === ChangeType.ADDED) return `<span style="color: #3b82f6; text-decoration: underline;">${escapeHtml(s.text)}</span>`;
       if (s.type === ChangeType.REMOVED) return `<span style="color: #ef4444; text-decoration: line-through;">${escapeHtml(s.text)}</span>`;
+      // Same word, different case: underlined, but left in the body colour so it
+      // does not read as new wording.
+      if (s.type === ChangeType.CASE_CHANGED) return `<span style="text-decoration: underline;">${escapeHtml(s.text)}</span>`;
       return escapeHtml(s.text);
     }).join('')}</div>`;
 
@@ -59,12 +63,21 @@ const RedlineViewer: React.FC<RedlineViewerProps> = ({ segments, scrollRef, onSc
   const isDark = settings.theme === 'dark';
   const themeBg = isDark ? 'bg-slate-950' : 'bg-white';
   const textMain = isDark ? 'text-slate-200' : 'text-slate-800';
+  // Only padding inside the mark, no outer margin: the margin used to push the
+  // surrounding words apart, so a changed number or an added semicolon looked as
+  // if it had spaces around it that are not in the text. A gap is added back
+  // below, between a deletion and the insertion that replaces it.
   const addedClass = isDark
-    ? 'bg-blue-500/20 text-blue-300 underline decoration-blue-500/60 decoration-2 underline-offset-2 mx-0.5 rounded-sm px-0.5'
-    : 'bg-blue-100 text-blue-700 underline decoration-blue-300 decoration-2 underline-offset-2 mx-0.5 rounded-sm px-0.5';
+    ? 'bg-blue-500/20 text-blue-300 underline decoration-blue-500/60 decoration-2 underline-offset-2 rounded-sm px-0.5'
+    : 'bg-blue-100 text-blue-700 underline decoration-blue-300 decoration-2 underline-offset-2 rounded-sm px-0.5';
   const removedClass = isDark
-    ? 'bg-red-500/10 text-red-400 line-through decoration-red-500/50 decoration-2 mx-0.5 opacity-80'
-    : 'bg-red-50 text-red-600 line-through decoration-red-400/50 decoration-2 mx-0.5 opacity-80';
+    ? 'bg-red-500/10 text-red-400 line-through decoration-red-500/50 decoration-2 rounded-sm px-0.5 opacity-80'
+    : 'bg-red-50 text-red-600 line-through decoration-red-400/50 decoration-2 rounded-sm px-0.5 opacity-80';
+  // The same word written differently: keep the body colour — it is not new
+  // wording — and mark it with an underline only.
+  const caseChangedClass = isDark
+    ? 'text-slate-200 underline decoration-amber-400/80 decoration-2 underline-offset-2 decoration-dotted'
+    : 'text-slate-800 underline decoration-amber-500 decoration-2 underline-offset-2 decoration-dotted';
 
   return (
     <div className={`flex flex-col h-full relative ${themeBg}`}>
@@ -74,13 +87,15 @@ const RedlineViewer: React.FC<RedlineViewerProps> = ({ segments, scrollRef, onSc
         className={`flex-1 leading-relaxed whitespace-pre-wrap p-4 overflow-y-auto ${textMain}`}
         style={{ fontSize: `${settings.fontSize}px` }}
       >
-        {segments.map((segment) => {
+        {segments.map((segment, i) => {
           switch (segment.type) {
             case ChangeType.ADDED:
               return (
                 <span
                   key={segment.id}
-                  className={addedClass}
+                  // Keep the new wording from running straight into the struck-out
+                  // wording it replaces.
+                  className={`${addedClass}${segments[i - 1]?.type === ChangeType.REMOVED ? ' ml-1' : ''}`}
                   id={segment.id}
                 >
                   {segment.text}
@@ -92,6 +107,17 @@ const RedlineViewer: React.FC<RedlineViewerProps> = ({ segments, scrollRef, onSc
                   key={segment.id}
                   className={removedClass}
                   id={segment.id}
+                >
+                  {segment.text}
+                </span>
+              );
+            case ChangeType.CASE_CHANGED:
+              return (
+                <span
+                  key={segment.id}
+                  className={caseChangedClass}
+                  id={segment.id}
+                  title={`Stejné slovo, jiná velikost písmen — původně „${segment.originalText ?? ''}“`}
                 >
                   {segment.text}
                 </span>

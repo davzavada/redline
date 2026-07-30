@@ -39,6 +39,8 @@ const ExportModal: React.FC<ExportModalProps> = ({
   const getSegmentHtml = (s: DiffSegment) => {
     if (s.type === ChangeType.ADDED) return `<span style="color: #3b82f6; text-decoration: underline;">${escapeHtml(s.text)}</span>`;
     if (s.type === ChangeType.REMOVED) return `<span style="color: #ef4444; text-decoration: line-through;">${escapeHtml(s.text)}</span>`;
+    // Same word, different case: underlined in the body colour.
+    if (s.type === ChangeType.CASE_CHANGED) return `<span style="text-decoration: underline;">${escapeHtml(s.text)}</span>`;
     return escapeHtml(s.text);
   };
 
@@ -118,6 +120,7 @@ const ExportModal: React.FC<ExportModalProps> = ({
                     {segments.map((s, i) => {
                       if (s.type === ChangeType.ADDED) return <span key={i} className="text-blue-600 underline decoration-blue-300">{s.text}</span>;
                       if (s.type === ChangeType.REMOVED) return <span key={i} className="text-red-500 line-through decoration-red-300">{s.text}</span>;
+                      if (s.type === ChangeType.CASE_CHANGED) return <span key={i} className="underline decoration-dotted decoration-amber-500">{s.text}</span>;
                       return <span key={i}>{s.text}</span>;
                     })}
                   </td>
