@@ -3,9 +3,7 @@ import { Document, DiffSegment, ChangeType } from './types';
 import InputPanel from './components/InputPanel';
 import RedlineViewer from './components/RedlineViewer';
 import ExportModal from './components/ExportModal';
-import DocumentViewer from './components/DocumentViewer';
 import { DiffStats, generateSmartDiff, summarizeDiff } from './utils/diffEngine';
-import { PdfSource } from './utils/pdfText';
 import { Settings as SettingsIcon } from 'lucide-react';
 
 const DEMO_ORIGINAL = `Příliš žluťoučký kůň úpěl ďábelské ódy.`;
@@ -19,8 +17,6 @@ interface Settings {
   fontSize: number;
   removeLineBreaks: boolean;
   removeExtraSpaces: boolean;
-  /** 'columns' edits the two texts side by side, 'viewer' reads the result. */
-  view?: 'columns' | 'viewer';
 }
 
 const SETTINGS_KEY = 'redline-settings';
@@ -127,26 +123,8 @@ const App: React.FC = () => {
       fontSize: 14,
       removeLineBreaks: false,
       removeExtraSpaces: false,
-      view: 'columns',
     };
   });
-
-  /**
-   * The pages of every document imported from a PDF, so the viewer can render
-   * them. Kept in memory only: the workspace that survives a reload holds text,
-   * and megabytes of file would not fit in it anyway.
-   */
-  const [pdfSources, setPdfSources] = useState<Record<string, PdfSource>>({});
-  const handlePdfSource = (id: string, pdf: PdfSource | null) => {
-    setPdfSources(previous => {
-      if (!pdf) {
-        if (!(id in previous)) return previous;
-        const { [id]: _dropped, ...rest } = previous;
-        return rest;
-      }
-      return { ...previous, [id]: pdf };
-    });
-  };
 
   useEffect(() => {
     localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings));
@@ -273,8 +251,6 @@ const App: React.FC = () => {
   // Keyboard shortcuts: Alt+↓ / Alt+↑ steps through changes
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
-      // The document view has its own stepper, over its own marks.
-      if (settings.view === 'viewer') return;
       if (e.altKey && (e.key === 'ArrowDown' || e.key === 'ArrowUp')) {
         e.preventDefault();
         navigateChange(e.key === 'ArrowDown' ? 'next' : 'prev');
@@ -282,7 +258,7 @@ const App: React.FC = () => {
     };
     window.addEventListener('keydown', onKeyDown);
     return () => window.removeEventListener('keydown', onKeyDown);
-  }, [diffSegments, activeChangeIndex, settings.view]);
+  }, [diffSegments, activeChangeIndex]);
 
   const handleAddDocument = () => {
     if (documents.length >= 8) return;
@@ -335,22 +311,6 @@ const App: React.FC = () => {
         : (isDark ? 'text-slate-500 hover:bg-slate-700/50 hover:text-slate-300 border-transparent' : 'text-slate-400 hover:bg-slate-50 hover:text-slate-600 border-transparent')
     }`;
 
-  const isViewer = settings.view === 'viewer';
-
-  if (isViewer) {
-    return (
-      <div className={`flex flex-col h-screen overflow-hidden ${themeClasses[settings.theme]} ${fontClasses[settings.font]}`}>
-        <DocumentViewer
-          segments={diffSegments}
-          source={{ document: leftDoc, pdf: pdfSources[leftDoc?.id] }}
-          target={{ document: rightDoc, pdf: pdfSources[rightDoc?.id] }}
-          settings={settings}
-          onExit={() => setSettings(s => ({ ...s, view: 'columns' }))}
-        />
-      </div>
-    );
-  }
-
   return (
     <div className={`flex flex-col h-screen overflow-hidden ${themeClasses[settings.theme]} ${fontClasses[settings.font]}`}>
       <main className="flex-1 flex overflow-hidden relative p-1">
@@ -366,7 +326,6 @@ const App: React.FC = () => {
                 onSelectDoc={setLeftDocId}
                 onChangeText={handleUpdateText}
                 onRenameDoc={handleRenameDoc}
-                onPdfSource={handlePdfSource}
                 onDeleteDoc={handleDeleteDocument}
                 onAddDoc={handleAddDocument}
                 scrollRef={leftRef}
@@ -385,7 +344,6 @@ const App: React.FC = () => {
                 onSelectDoc={setRightDocId}
                 onChangeText={handleUpdateText}
                 onRenameDoc={handleRenameDoc}
-                onPdfSource={handlePdfSource}
                 onDeleteDoc={handleDeleteDocument}
                 onAddDoc={handleAddDocument}
                 scrollRef={rightRef}
@@ -419,16 +377,8 @@ const App: React.FC = () => {
              <div className={`flex flex-col h-full rounded-lg shadow-sm border overflow-hidden ${isDark ? 'bg-slate-900 border-slate-800' : 'bg-white border-slate-200'}`}>
                 <div className={`${isDark ? 'bg-slate-800 border-slate-700' : 'bg-slate-50 border-slate-200'} border-b flex flex-col shrink-0`}>
                   <div className={`px-3 flex justify-between items-center h-[38px] border-b ${isDark ? 'border-slate-700/50' : 'border-slate-200/50'}`}>
-                     <div className="flex items-center gap-2">
+                     <div className="flex items-center gap-3">
                         <span className="text-xs font-bold text-slate-500 uppercase tracking-wider">Změny</span>
-                        <button
-                          onClick={() => setSettings(s => ({ ...s, view: 'viewer' }))}
-                          className={`${settingChipClass(false)} flex items-center gap-1`}
-                          title="Zobrazit porovnání jako dokument — strany PDF, tisk a export"
-                        >
-                          <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" /></svg>
-                          Dokument
-                        </button>
                      </div>
 
                      <div className="flex items-center gap-1.5">

@@ -2,8 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { zipSync, strToU8 } from 'fflate';
 import { ACCEPTED_HINT, FileImportError, readDocumentFile } from './fileText';
 import { documentXmlToText, extractDocxText } from './docxText';
-import { PdfTextItem, assembleDocument, assemblePageText, extractPdf, extractPdfText, rangeRectangles } from './pdfText';
-import { segmentRanges, changesOnSide, marksOnSide, splitRun } from './segmentRanges';
+import { assemblePageText, extractPdfText, joinPages, mendHyphenation } from './pdfText';
 import { decodeXmlText, walkXml } from './xml';
 import { generateSmartDiff, summarizeDiff } from './diffEngine';
 import { ChangeType } from '../types';
@@ -68,21 +67,6 @@ const asFile = (bytes: Uint8Array | string, name: string, type = '') =>
   new File([bytes as BlobPart], name, { type });
 
 const readPdf = (bytes: Uint8Array) => extractPdfText(bytes.buffer as ArrayBuffer);
-
-/** A pdf.js text item, as the page assembler sees them. */
-let runX = 50;
-const run = (str: string, over: Partial<PdfTextItem> = {}): PdfTextItem => {
-  const item: PdfTextItem = {
-    str,
-    hasEOL: false,
-    transform: [12, 0, 0, 12, runX, 800],
-    width: str.length * 6,
-    height: 12,
-    ...over,
-  };
-  runX = over.hasEOL || item.hasEOL ? 50 : runX + (item.width ?? 0);
-  return item;
-};
 
 // --- xml --------------------------------------------------------------------
 
@@ -186,15 +170,9 @@ describe('PDF import', () => {
   });
 
   it('keeps a real hyphen that happens to end a line', () => {
-    // One letter before the hyphen, or a capital after it, means the hyphen is
-    // part of the word rather than a typesetter's.
-    expect(assembleDocument([[run('e-', { hasEOL: true }), run('mail')]]).text).toBe('e-\nmail');
-    expect(assembleDocument([[run('Praha-', { hasEOL: true }), run('Smíchov')]]).text).toBe(
-      'Praha-\nSmíchov'
-    );
-    expect(assembleDocument([[run('dodava-', { hasEOL: true }), run('tele')]]).text).toBe(
-      'dodavatele'
-    );
+    expect(mendHyphenation('e-\nmail')).toBe('e-\nmail');
+    expect(mendHyphenation('Praha-\nSmíchov')).toBe('Praha-\nSmíchov');
+    expect(mendHyphenation('dodava-\ntele')).toBe('dodavatele');
   });
 
   it('says so when a PDF holds no text at all', async () => {
@@ -244,162 +222,9 @@ describe('PDF import', () => {
       ).toBe('A\nB');
     });
 
-    it('leaves one blank line between pages, and none for a page with nothing on it', () => {
-      expect(
-        assembleDocument([[run('jedna')], [], [run('dve')]]).text
-      ).toBe('jedna\n\ndve');
+    it('drops pages that hold nothing', () => {
+      expect(joinPages(['jedna', '   \n', '', 'dve'])).toBe('jedna\n\ndve');
     });
-  });
-});
-
-// --- pointing at the page a change happened on ------------------------------
-
-describe('locating text on the page', () => {
-  it('records a range for every run, matching the text it produced', async () => {
-    const pdf = buildPdf(
-      [line(800, 'Cena dila cini 1.500 Kc'), line(780, 'bez DPH.')].join('\n'),
-      line(800, 'Priloha 1.')
-    );
-    const { text, boxes, pages } = await extractPdf(pdf.buffer as ArrayBuffer);
-
-    expect(text).toBe('Cena dila cini 1.500 Kc\nbez DPH.\n\nPriloha 1.');
-    expect(pages).toHaveLength(2);
-    expect(pages[0].width).toBeCloseTo(595, 0);
-    expect(pages[0].height).toBeCloseTo(842, 0);
-
-    // Every box must quote the text it covers, on the page it came from.
-    expect(boxes.map(box => [box.page, text.slice(box.start, box.end)])).toEqual([
-      [0, 'Cena dila cini 1.500 Kc'],
-      [0, 'bez DPH.'],
-      [1, 'Priloha 1.'],
-    ]);
-  });
-
-  it('keeps the ranges honest across a mended hyphen', () => {
-    const { text, boxes } = assembleDocument([
-      [run('splat-', { hasEOL: true }), run('na do 14 dnu.')],
-    ]);
-    expect(text).toBe('splatna do 14 dnu.');
-    // The hyphen is gone from the text, so it is gone from the run that held it.
-    expect(boxes.map(box => text.slice(box.start, box.end))).toEqual(['splat', 'na do 14 dnu.']);
-  });
-
-  it('turns a character range into rectangles on the right pages', () => {
-    const boxes = [
-      { start: 0, end: 10, page: 0, x: 50, y: 700, width: 100, height: 12 },
-      { start: 11, end: 21, page: 1, x: 50, y: 600, width: 100, height: 12 },
-    ];
-
-    // A range inside one run is interpolated along that run's width.
-    expect(rangeRectangles(boxes, 5, 10)).toEqual([
-      { page: 0, x: 100, y: 700, width: 50, height: 12 },
-    ]);
-
-    // A range spanning both runs yields one rectangle per run, per page.
-    const spanning = rangeRectangles(boxes, 8, 14);
-    expect(spanning).toHaveLength(2);
-    expect(spanning[0]).toMatchObject({ page: 0, x: 130 });
-    expect(spanning[1]).toMatchObject({ page: 1, x: 50, width: 30 });
-
-    // Nothing to draw where nothing changed.
-    expect(rangeRectangles(boxes, 30, 40)).toEqual([]);
-  });
-});
-
-describe('mapping changes back onto each document', () => {
-  it('gives every segment its place in the source and in the target', () => {
-    const a = 'Cena je 100 Kč.';
-    const b = 'Cena je 200 Kč.';
-    const ranges = segmentRanges(generateSmartDiff(a, b));
-
-    for (const { segment, source, target } of ranges) {
-      if (source) expect(a.slice(source[0], source[1])).toBe(segment.originalText ?? segment.text);
-      if (target) expect(b.slice(target[0], target[1])).toBe(segment.text);
-      if (segment.type === ChangeType.ADDED) expect(source).toBeNull();
-      if (segment.type === ChangeType.REMOVED) expect(target).toBeNull();
-    }
-  });
-
-  it('marks deletions on the source, insertions on the target, case on both', () => {
-    const a = 'Smluvní strany do 14 dnů.';
-    const b = 'SMLUVNÍ STRANY do 30 dnů od faktury.';
-    const ranges = segmentRanges(generateSmartDiff(a, b));
-
-    const onSource = changesOnSide(ranges, 'source').map(r => r.segment.type);
-    const onTarget = changesOnSide(ranges, 'target').map(r => r.segment.type);
-    expect(onSource).toContain(ChangeType.REMOVED);
-    expect(onSource).toContain(ChangeType.CASE_CHANGED);
-    expect(onSource).not.toContain(ChangeType.ADDED);
-    expect(onTarget).toContain(ChangeType.ADDED);
-    expect(onTarget).toContain(ChangeType.CASE_CHANGED);
-    expect(onTarget).not.toContain(ChangeType.REMOVED);
-
-    // What is marked on the source really is that document's own wording.
-    for (const change of changesOnSide(ranges, 'source')) {
-      const range = change.source!;
-      expect(a.slice(range[0], range[1])).toBe(change.segment.originalText ?? change.segment.text);
-    }
-  });
-
-  it('cuts a line into the stretches a change covers and those it does not', () => {
-    const line = 'Cena je 100 Kč.';
-    const marks = [{ start: 8, end: 11, type: ChangeType.REMOVED, id: 'seg-1' }];
-
-    expect(splitRun(line, 0, marks)).toEqual([
-      { text: 'Cena je ', mark: null },
-      { text: '100', mark: marks[0] },
-      { text: ' Kč.', mark: null },
-    ]);
-
-    // A line that is entirely covered, and one the change does not reach.
-    expect(splitRun('100', 8, marks)).toEqual([{ text: '100', mark: marks[0] }]);
-    expect(splitRun('jiný řádek', 100, marks)).toEqual([{ text: 'jiný řádek', mark: null }]);
-  });
-
-  it('cuts a change that runs off the end of one line onto the next', () => {
-    const marks = [{ start: 5, end: 25, type: ChangeType.ADDED, id: 'seg-3' }];
-    // The first line holds the start of the change, the second holds the rest.
-    expect(splitRun('abcdefghij', 0, marks)).toEqual([
-      { text: 'abcde', mark: null },
-      { text: 'fghij', mark: marks[0] },
-    ]);
-    // This run covers offsets 10 to 26, and the change stops at 25.
-    expect(splitRun('klmnopqrstuvwxyz', 10, marks)).toEqual([
-      { text: 'klmnopqrstuvwxy', mark: marks[0] },
-      { text: 'z', mark: null },
-    ]);
-  });
-
-  it('keeps two changes on one line apart', () => {
-    const marks = [
-      { start: 3, end: 6, type: ChangeType.REMOVED, id: 'a' },
-      { start: 9, end: 12, type: ChangeType.CASE_CHANGED, id: 'b' },
-    ];
-    expect(splitRun('012345678901234', 0, marks).map(p => [p.text, p.mark?.id ?? null])).toEqual([
-      ['012', null],
-      ['345', 'a'],
-      ['678', null],
-      ['901', 'b'],
-      ['234', null],
-    ]);
-  });
-
-  it('locates a change on the page of the PDF it came from', async () => {
-    const original = buildPdf([line(800, 'Cena dila cini 1.500 Kc'), line(780, 'bez DPH.')].join('\n'));
-    const { text, boxes } = await extractPdf(original.buffer as ArrayBuffer);
-    const edited = text.replace('1.500', '1.750');
-
-    const ranges = segmentRanges(generateSmartDiff(text, edited));
-    const removed = changesOnSide(ranges, 'source').find(r => r.segment.text === '1.500');
-    expect(removed).toBeDefined();
-
-    const rectangles = rangeRectangles(boxes, removed!.source![0], removed!.source![1]);
-    expect(rectangles).toHaveLength(1);
-    // "1.500" sits on the first line, part way along it, not at its start.
-    expect(rectangles[0].page).toBe(0);
-    expect(rectangles[0].y).toBeCloseTo(800, 0);
-    expect(rectangles[0].x).toBeGreaterThan(50);
-    expect(rectangles[0].width).toBeGreaterThan(0);
   });
 });
 
