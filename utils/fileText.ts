@@ -1,5 +1,5 @@
 import { DocxError, extractDocxText } from './docxText';
-import { PdfError, extractPdfText } from './pdfText';
+import { PdfError, PdfSource, extractPdf } from './pdfText';
 
 // Turns a dropped or picked file into text to compare. Everything runs in the
 // browser: nothing is uploaded, and the app works with the network switched off.
@@ -31,6 +31,8 @@ export interface ImportedDocument {
   text: string;
   /** File name without its extension, for the document tab. */
   name: string;
+  /** Set for a PDF, so the viewer can show the pages the text came from. */
+  pdf?: PdfSource;
 }
 
 const baseName = (fileName: string) => fileName.replace(/\.[^.]+$/, '').trim();
@@ -60,7 +62,9 @@ export const readDocumentFile = async (file: File): Promise<ImportedDocument> =>
 
   try {
     if (isPdf(file)) {
-      return { text: await extractPdfText(await file.arrayBuffer()), name };
+      const bytes = await file.arrayBuffer();
+      const parsed = await extractPdf(bytes);
+      return { text: parsed.text, name, pdf: { ...parsed, bytes } };
     }
     if (isDocx(file)) {
       return { text: extractDocxText(await file.arrayBuffer()), name };

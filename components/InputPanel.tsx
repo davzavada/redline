@@ -1,6 +1,7 @@
 import React, { useRef, useState } from 'react';
 import { Document } from '../types';
 import { ACCEPTED_FILE_TYPES, ACCEPTED_HINT, readDocumentFile } from '../utils/fileText';
+import { PdfSource } from '../utils/pdfText';
 
 /**
  * Lets the browser paint before we start parsing. A PDF is parsed on this thread
@@ -23,6 +24,11 @@ interface InputPanelProps {
   onSelectDoc: (id: string) => void;
   onChangeText: (id: string, text: string) => void;
   onRenameDoc: (id: string, newName: string) => void;
+  /**
+   * Hands over the pages an imported PDF was read from, or null when a document is
+   * replaced by something that has no pages of its own.
+   */
+  onPdfSource?: (id: string, pdf: PdfSource | null) => void;
   onDeleteDoc?: (id: string) => void;
   onAddDoc?: () => void;
   headerAction?: React.ReactNode;
@@ -44,6 +50,7 @@ const InputPanel: React.FC<InputPanelProps> = ({
   onSelectDoc, 
   onChangeText,
   onRenameDoc,
+  onPdfSource,
   onDeleteDoc,
   onAddDoc,
   headerAction,
@@ -66,9 +73,10 @@ const InputPanel: React.FC<InputPanelProps> = ({
     setImporting(file.name);
     try {
       await yieldToPaint();
-      const { text, name } = await readDocumentFile(file);
+      const { text, name, pdf } = await readDocumentFile(file);
       onChangeText(selectedDoc.id, text);
       if (name) onRenameDoc(selectedDoc.id, name);
+      onPdfSource?.(selectedDoc.id, pdf ?? null);
     } catch (error) {
       // readDocumentFile phrases its failures for the reader; anything else is a
       // bug and should still say something useful rather than nothing.
