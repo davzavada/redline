@@ -109,7 +109,7 @@ const InputPanel: React.FC<InputPanelProps> = ({
 
   const isDark = settings.theme === 'dark';
   const themeBg = isDark ? 'bg-slate-900 border-slate-800' : 'bg-white border-slate-200';
-  const headerBg = isDark ? 'bg-slate-800 border-slate-700' : 'bg-slate-50 border-slate-200';
+  const headerBg = isDark ? 'bg-slate-800 border-slate-700' : 'bg-white border-slate-200';
   const textSecondary = isDark ? 'text-slate-400' : 'text-slate-500';
 
   return (

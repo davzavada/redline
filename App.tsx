@@ -88,17 +88,23 @@ const App: React.FC = () => {
   const [isDownloadingApp, setIsDownloadingApp] = useState(false);
   const settingsPopoverRef = useRef<HTMLDivElement>(null);
 
+  // The offline copy is itself the downloaded file, opened from disk: there is no
+  // server next to it to fetch another one from.
+  const canDownloadApp = typeof window === 'undefined' || window.location.protocol !== 'file:';
+
   const handleDownloadApp = async () => {
     setIsDownloadingApp(true);
     try {
-      const response = await fetch('/api/download-html');
+      // The deployed site ships the inlined copy as a static file; the dev server
+      // has no such file and builds one on demand instead.
+      const response = await fetch(import.meta.env.DEV ? '/api/download-html' : '/redline-offline.html');
       if (!response.ok) throw new Error('Build failed');
       const blob = await response.blob();
       const url = window.URL.createObjectURL(blob);
       const a = document.createElement('a');
       a.style.display = 'none';
       a.href = url;
-      a.download = 'LegalLens-Redline-Offline.html';
+      a.download = 'Redline-offline.html';
       document.body.appendChild(a);
       a.click();
       window.URL.revokeObjectURL(url);
@@ -320,10 +326,12 @@ const App: React.FC = () => {
     mono: 'font-mono'
   };
 
+  // The panels are white throughout; this is the colour behind them, a shade
+  // darker so the gutters read as gaps between sheets rather than as nothing.
   const themeClasses = {
-    light: 'bg-slate-50 text-slate-900',
+    light: 'bg-slate-200 text-slate-900',
     dark: 'bg-slate-950 text-slate-100',
-    slate: 'bg-slate-100 text-slate-800'
+    slate: 'bg-slate-300 text-slate-800'
   };
 
   const isDark = settings.theme === 'dark';
@@ -353,8 +361,8 @@ const App: React.FC = () => {
 
   return (
     <div className={`flex flex-col h-screen overflow-hidden ${themeClasses[settings.theme]} ${fontClasses[settings.font]}`}>
-      <main className="flex-1 flex overflow-hidden relative p-1">
-        <div className="flex-1 grid grid-cols-1 lg:grid-cols-3 gap-1 overflow-hidden">
+      <main className="flex-1 flex overflow-hidden relative p-2">
+        <div className="flex-1 grid grid-cols-1 lg:grid-cols-3 gap-2 overflow-hidden">
 
           {/* Column 1: Source */}
           <div className="flex flex-col h-full overflow-hidden">
@@ -417,7 +425,7 @@ const App: React.FC = () => {
           {/* Column 3: Redline */}
           <div className="flex flex-col h-full overflow-hidden">
              <div className={`flex flex-col h-full rounded-lg shadow-sm border overflow-hidden ${isDark ? 'bg-slate-900 border-slate-800' : 'bg-white border-slate-200'}`}>
-                <div className={`${isDark ? 'bg-slate-800 border-slate-700' : 'bg-slate-50 border-slate-200'} border-b flex flex-col shrink-0`}>
+                <div className={`${isDark ? 'bg-slate-800 border-slate-700' : 'bg-white border-slate-200'} border-b flex flex-col shrink-0`}>
                   <div className={`px-3 flex justify-between items-center h-[38px] border-b ${isDark ? 'border-slate-700/50' : 'border-slate-200/50'}`}>
                      <div className="flex items-center gap-2">
                         <span className="text-xs font-bold text-slate-500 uppercase tracking-wider">Změny</span>
@@ -527,6 +535,23 @@ const App: React.FC = () => {
                                   >+</button>
                                 </div>
                               </div>
+                              {canDownloadApp && (
+                              <div className={`border-t pt-3 ${isDark ? 'border-slate-700' : 'border-slate-200'}`}>
+                                <div className="text-[9px] font-bold uppercase tracking-wider text-slate-500 mb-1.5">Aplikace</div>
+                                <button
+                                  onClick={handleDownloadApp}
+                                  disabled={isDownloadingApp}
+                                  className={`w-full text-[10px] px-2 py-1.5 rounded border transition-colors disabled:opacity-50 ${
+                                    isDark
+                                      ? 'border-slate-700 text-slate-300 hover:bg-slate-700'
+                                      : 'border-slate-200 text-slate-600 hover:bg-slate-50'
+                                  }`}
+                                  title="Stáhne celou aplikaci jako jeden HTML soubor, který funguje i bez internetu"
+                                >
+                                  {isDownloadingApp ? 'Připravuji soubor…' : 'Stáhnout pro offline'}
+                                </button>
+                              </div>
+                              )}
                             </div>
                           )}
                         </div>
@@ -551,16 +576,9 @@ const App: React.FC = () => {
                    <RedlineViewer segments={diffSegments} scrollRef={redlineRef} onScroll={handleScroll} onOpenExport={() => setIsExportOpen(true)} settings={settings} />
                 </div>
 
-                <div className={`px-3 h-[24px] border-t text-[9px] flex justify-between items-center ${
+                <div className={`px-3 h-[24px] border-t text-[9px] flex justify-end items-center ${
                   isDark ? 'bg-slate-900 border-slate-800 text-slate-500' : 'bg-white border-slate-100 text-slate-400'
                 }`}>
-                      <span
-                        onDoubleClick={!isDownloadingApp ? handleDownloadApp : undefined}
-                        className={`cursor-default select-none transition-colors ${isDark ? 'text-slate-600 hover:text-slate-500' : 'text-slate-300 hover:text-slate-400'}`}
-                        title="Dvojklikem stáhnete offline HTML aplikaci"
-                      >
-                        {isDownloadingApp ? 'Kompilace release...' : 'Build 25.10.42'}
-                      </span>
                       <span>{changesCount} {plural(changesCount, 'změna', 'změny', 'změn')} celkem</span>
                 </div>
              </div>

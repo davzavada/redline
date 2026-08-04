@@ -470,11 +470,11 @@ const DocumentViewer: React.FC<DocumentViewerProps> = ({
   }`;
 
   return (
-    <div className={`flex flex-col h-full overflow-hidden ${isDark ? 'bg-slate-950' : 'bg-slate-100'}`}>
+    <div className={`flex flex-col h-full overflow-hidden ${isDark ? 'bg-slate-950' : 'bg-slate-200'}`}>
       {/* Toolbar */}
       <div
         className={`shrink-0 flex items-center gap-3 px-3 h-[42px] border-b print:hidden ${
-          isDark ? 'bg-slate-900 border-slate-800' : 'bg-slate-50 border-slate-200'
+          isDark ? 'bg-slate-900 border-slate-800' : 'bg-white border-slate-200'
         }`}
       >
         <span className="text-xs font-bold uppercase tracking-wider text-slate-500">Dokument</span>

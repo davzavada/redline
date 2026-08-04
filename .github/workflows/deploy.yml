@@ -31,6 +31,13 @@ jobs:
       - name: Build
         run: npm run build
 
+      # The whole app inlined into one file, served next to the site so
+      # "Stáhnout pro offline" in the settings has something to hand over.
+      - name: Build offline copy
+        run: |
+          npm run build:single
+          cp dist-single/index.html dist/redline-offline.html
+
       # Vite builds to dist/index.html; carry the custom-domain CNAME along.
       - name: Add CNAME
         run: cp CNAME dist/CNAME
