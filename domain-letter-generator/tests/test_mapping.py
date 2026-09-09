@@ -421,3 +421,89 @@ def test_obsahove_placeholdery_se_dal_sluci_podle_vnitrku() -> None:
 
     (pole,) = suggest_fields(scan)
     assert pole.placeholder_ids == ["ph_000", "ph_001"]
+
+
+# ---------------------------------------------------------------------------
+# placeholder pojmenovaný podle toho, co do něj patří
+# ---------------------------------------------------------------------------
+def test_placeholder_pojmenovany_podle_obsahu_vyhraje_nad_kontextem() -> None:
+    """Regrese: „[DATUM]“ dostalo popisek „Držitel doménového jména“.
+
+    Pravidlo pro držitele se řídí jen okolním textem odstavce — a do kontextu
+    spadnou i sousední placeholdery. Ve větě „registrované dne [DATUM] na jméno
+    [DRŽITEL]“ proto vyhrálo u obou a datum se nabídlo jako text.
+    """
+
+    veta = "obracíme se ve věci domény [DOMÉNA], registrované dne [DATUM] na jméno [DRŽITEL]."
+    scan = ScanResult(
+        placeholders=[
+            ph("DOMÉNA", order=0, context=veta),
+            ph("DATUM", order=1, context=veta),
+            ph("DRŽITEL", order=2, context=veta),
+        ]
+    )
+
+    pole = {f.key: f for f in suggest_fields(scan)}
+    assert set(pole) == {"domena", "datum", "drzitel"}
+    assert pole["datum"].label == "Datum"
+    assert pole["datum"].type == "date", "datum se má nabídnout jako datum, ne jako text"
+    assert pole["drzitel"].label == "Držitel doménového jména"
+
+
+@pytest.mark.parametrize(
+    ("inner", "klic", "popisek"),
+    [
+        ("DATUM", "datum", "Datum"),
+        ("datum", "datum", "Datum"),
+        ("JMÉNO", "jmeno", "Jméno a příjmení"),
+        ("JMENO", "jmeno", "Jméno a příjmení"),          # bez diakritiky
+        ("Jméno a příjmení", "jmeno", "Jméno a příjmení"),
+        ("PŘÍJMENÍ", "prijmeni", "Příjmení"),
+        ("DRŽITEL", "drzitel", "Držitel doménového jména"),
+        ("DOMÉNA", "domena", "Doménové jméno"),
+        ("doménové jméno", "domena", "Doménové jméno"),
+        ("LHŮTA", "lhuta", "Lhůta (počet dnů)"),
+        ("ODESÍLATEL", "odesilatel", "Odesílatel"),
+        ("ADRESA", "adresa", "Adresa"),
+        ("ULICE", "ulice", "Ulice a číslo popisné"),
+        ("MĚSTO", "mesto", "Město"),
+        ("PSČ", "psc", "PSČ"),
+        ("IČO", "ico", "IČO"),
+        ("E-mail", "email", "E-mail"),
+        ("telefon", "telefon", "Telefon"),
+        ("ZEMĚ", "zeme", "Země"),
+        ("spisová značka", "spisova_znacka", "Spisová značka"),
+        ("sp. zn.", "spisova_znacka", "Spisová značka"),
+        ("číslo jednací", "cislo_jednaci", "Číslo jednací"),
+    ],
+)
+def test_samopopisne_placeholdery(inner: str, klic: str, popisek: str) -> None:
+    """Šablony běžně pojmenovávají místa k vyplnění — má se to použít."""
+
+    (pole,) = suggest_fields(ScanResult(placeholders=[ph(inner)]))
+    assert pole.key == klic
+    assert pole.label == popisek
+
+
+@pytest.mark.parametrize(
+    "inner",
+    [
+        "Praha",              # město, ale ne slovo „město“
+        "Datum podání",       # obsahuje „datum“, ale není to holý název
+        "Jan Novák",
+        "12. 3. 2026",
+        "Doménové jméno je example.cz",
+    ],
+)
+def test_samopopisna_pravidla_neprestrelí(inner: str) -> None:
+    """Pravidla se chytají jen na HOLÝ název pole, ne na hodnotu, která ho obsahuje.
+
+    Jinak by se z „[Praha]“ stalo pole „Město“ a z „[Datum podání]“ pole
+    „Datum“ — a hodnota napsaná v šabloně by se ztratila v nesprávném poli.
+    """
+
+    for rule in mapping._SELF_NAMED_RULES:
+        assert not mapping._rule_matches(rule, inner, "", "bracket", ""), (
+            f"samopopisné pravidlo {rule.key!r} se chytlo na hodnotu {inner!r}"
+        )
+

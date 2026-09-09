@@ -71,7 +71,60 @@ class FieldRule:
 # ---------------------------------------------------------------------------
 # Tabulka vzorů. Pořadí je významné: první shoda vyhrává.
 # ---------------------------------------------------------------------------
-FIELD_RULES: tuple[FieldRule, ...] = (
+
+#: Placeholder, který se jmenuje podle toho, co do něj patří: „[DATUM]“,
+#: „[JMÉNO]“, „{{odesilatel}}“. Je to nejsilnější signál, jaký šablona dává —
+#: autor doslova napsal, co tam přijde — a proto tahle pravidla stojí první.
+#:
+#: Bez nich vyhrálo pravidlo, které se řídí jen okolním textem odstavce, a
+#: protože do kontextu spadnou i sousední placeholdery, dopadlo to takhle:
+#: ve větě „registrované dne [DATUM] na jméno [DRŽITEL]“ dostalo pole pro
+#: datum popisek „Držitel doménového jména“ a typ „text“ místo „datum“.
+#:
+#: Vzory počítají s psaním bez diakritiky ([JMENO] i [JMÉNO]); velikost písmen
+#: se neřeší, vyhodnocení běží s ``re.IGNORECASE``.
+_SELF_NAMED_RULES: tuple[FieldRule, ...] = (
+    FieldRule(key="datum", label="Datum", type="date", inner=r"^datum$"),
+    FieldRule(
+        key="jmeno",
+        label="Jméno a příjmení",
+        inner=r"^jm[ée]no(?:\s+a\s+p[řr][íi]jmen[íi])?$",
+    ),
+    FieldRule(key="prijmeni", label="Příjmení", inner=r"^p[řr][íi]jmen[íi]$"),
+    FieldRule(
+        key="drzitel",
+        label="Držitel doménového jména",
+        inner=r"^dr[žz]itel(?:\s+(?:dom[ée]ny|dom[ée]nov[ée]ho\s+jm[ée]na))?$",
+    ),
+    FieldRule(
+        key="domena",
+        label="Doménové jméno",
+        inner=r"^(?:dom[ée]na|dom[ée]nov[ée]\s+jm[ée]no)$",
+    ),
+    FieldRule(key="lhuta", label="Lhůta (počet dnů)", inner=r"^lh[ůu]ta$"),
+    FieldRule(key="odesilatel", label="Odesílatel", inner=r"^odes[íi]latel$"),
+    FieldRule(key="adresat", label="Adresát", inner=r"^adres[áa]t$"),
+    FieldRule(key="adresa", label="Adresa", inner=r"^adresa$"),
+    FieldRule(key="ulice", label="Ulice a číslo popisné", inner=r"^ulice$"),
+    FieldRule(key="mesto", label="Město", inner=r"^(?:m[ěe]sto|obec)$"),
+    FieldRule(key="psc", label="PSČ", inner=r"^ps[čc]$"),
+    FieldRule(key="ico", label="IČO", inner=r"^i[čc]o?$"),
+    FieldRule(key="email", label="E-mail", inner=r"^e-?mail$"),
+    FieldRule(key="telefon", label="Telefon", inner=r"^(?:telefon|mobil)$"),
+    FieldRule(key="zeme", label="Země", inner=r"^zem[ěe]$"),
+    FieldRule(
+        key="spisova_znacka",
+        label="Spisová značka",
+        inner=r"^(?:spisov[áa]\s+zna[čc]ka|sp\.?\s*zn\.?)$",
+    ),
+    FieldRule(
+        key="cislo_jednaci",
+        label="Číslo jednací",
+        inner=r"^(?:[čc][íi]slo\s+jednac[íi]|[čc]\.?\s*j\.?)$",
+    ),
+)
+
+FIELD_RULES: tuple[FieldRule, ...] = _SELF_NAMED_RULES + (
     FieldRule(
         key="email",
         label="E-mail",
