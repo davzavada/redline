@@ -22,15 +22,23 @@ import re
 import shutil
 import unicodedata
 import zipfile
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
 from . import config
 from .config import ConfigError, read_json, write_json_atomic
-from .models import ScanResult, TemplateMeta
+from .models import (
+    FieldSpec,
+    OptionalParagraph,
+    Placeholder,
+    ScanResult,
+    TemplateMeta,
+)
 
 __all__ = [
+    "MappingCheck",
     "StoreError",
     "TemplateNotFound",
     "TemplateStore",
@@ -50,6 +58,9 @@ MAX_TEMPLATE_BYTES = 50 * 1024 * 1024
 
 TEMPLATE_FILE_NAME = "template.docx"
 META_FILE_NAME = "meta.json"
+#: Snímek analýzy šablony pořízený ve chvíli, kdy vzniklo uložené mapování.
+#: Záměrně vedle ``meta.json``, ne v něm — ``TemplateMeta`` je kontrakt.
+SCAN_FILE_NAME = "scan.json"
 
 _ID_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9._-]{0,79}$")
 
@@ -149,16 +160,46 @@ def _check_docx(data: bytes, source_name: str) -> None:
         )
 
 
-def _meta_from_data(data: Any, fallback_id: str) -> TemplateMeta:
+def _salvage_list(
+    items: Any, factory: Any, problems: list[str], label: str
+) -> list[Any]:
+    """Přečte, co jde; vadné položky přeskočí a poznamená do ``problems``.
+
+    Jedna rozbitá položka nesmí sebrat všechny ostatní — u dvaceti ručně
+    namapovaných polí by to byla nevratná ztráta práce.
+    """
+
+    if items is None:
+        return []
+    if isinstance(items, Mapping):
+        items = list(items.values())
+    if isinstance(items, (str, bytes)) or not isinstance(items, (list, tuple)):
+        problems.append(f"{label}: očekával se seznam.")
+        return []
+    out: list[Any] = []
+    for index, item in enumerate(items, 1):
+        try:
+            out.append(factory(item))
+        except (AttributeError, TypeError, ValueError) as exc:
+            problems.append(f"{label}: položku č. {index} nelze přečíst ({exc}).")
+    return out
+
+
+def _meta_from_data(
+    data: Any, fallback_id: str, problems: list[str] | None = None
+) -> TemplateMeta:
     """Z JSONu udělá :class:`TemplateMeta` i tehdy, když má nesmyslné typy.
 
     Ručně upravený nebo poškozený ``meta.json`` (``"fields": "text"``,
     ``"optional_paragraphs": 7``) nesmí shodit celý seznam šablon — v takovém
-    případě se vezme aspoň to, co jde přečíst, a zbytek se zahodí.
+    případě se vezme aspoň to, co jde přečíst, a zbytek se zahodí. Co se
+    zahodilo, se zapíše do ``problems``, aby na to šlo uživatele upozornit
+    dřív, než uložením o mapování nenávratně přijde.
     """
 
     if not isinstance(data, Mapping):
         raise StoreError(f"Metadata šablony „{fallback_id}“ jsou poškozená.")
+    notes = problems if problems is not None else []
     try:
         meta = TemplateMeta.from_dict(data)
     except (AttributeError, TypeError, ValueError):
@@ -173,11 +214,79 @@ def _meta_from_data(data: Any, fallback_id: str) -> TemplateMeta:
             raise StoreError(
                 f"Metadata šablony „{fallback_id}“ jsou poškozená ({exc})."
             ) from exc
+        # každý seznam zvlášť — chyba v jednom nesmí smazat ostatní dva
+        meta.fields = _salvage_list(
+            data.get("fields"), FieldSpec.from_dict, notes, "Pole šablony"
+        )
+        meta.optional_paragraphs = _salvage_list(
+            data.get("optional_paragraphs"),
+            OptionalParagraph.from_dict,
+            notes,
+            "Volitelné odstavce",
+        )
+        tags = data.get("tags")
+        if isinstance(tags, (str, bytes)):
+            meta.tags = [tags.decode() if isinstance(tags, bytes) else tags]
+        elif isinstance(tags, (list, tuple)):
+            meta.tags = [str(t) for t in tags]
+        elif tags is not None:
+            notes.append("Štítky: očekával se seznam.")
     if not meta.id:
         meta.id = fallback_id
     if not meta.name.strip():
         meta.name = meta.id
     return meta
+
+
+@dataclass(frozen=True)
+class MappingCheck:
+    """Výsledek ověření, jestli uložené mapování ještě sedí na šablonu."""
+
+    changed: bool = False
+    stale_ids: tuple[str, ...] = ()
+    suspect_ids: tuple[str, ...] = ()
+    new_ids: tuple[str, ...] = ()
+    message: str = ""
+
+    @property
+    def ok(self) -> bool:
+        return not (self.stale_ids or self.suspect_ids or self.new_ids)
+
+
+def _placeholder_fingerprint(scan: ScanResult, placeholder: Placeholder) -> tuple:
+    """Otisk místa, na kterém placeholder leží — text i jeho sousedství.
+
+    Samotné ``id``, ``raw`` ani ``paragraph_id`` nestačí: všechna tři se počítají
+    z pořadí odstavce a jeho textu, takže po smazání odstavců nad placeholderem
+    vyjdou pro JINÉ místo dokumentu stejně. Rozdíl je až v okolí — proto se
+    porovnávají i sousední odstavce.
+    """
+
+    texts = [p.text for p in scan.paragraphs]
+    ids = [p.id for p in scan.paragraphs]
+    try:
+        index = ids.index(placeholder.paragraph_id)
+    except ValueError:
+        return (placeholder.raw, placeholder.context, None, None)
+    before = texts[index - 1] if index > 0 else ""
+    after = texts[index + 1] if index + 1 < len(texts) else ""
+    return (placeholder.raw, placeholder.context, before, after)
+
+
+def _plural_fields(count: int) -> str:
+    if count == 1:
+        return "1 pole"
+    if 2 <= count <= 4:
+        return f"{count} pole"
+    return f"{count} polí"
+
+
+def _plural_places(count: int) -> str:
+    if count == 1:
+        return "1 nové místo"
+    if 2 <= count <= 4:
+        return f"{count} nová místa"
+    return f"{count} nových míst"
 
 
 def _scan_docx(path: Path) -> ScanResult:
@@ -203,12 +312,16 @@ class TemplateStore:
     def __init__(self, root: Path | None = None) -> None:
         self.root = Path(root) if root is not None else config.templates_dir()
         self._scan_cache: dict[str, tuple[int, int, ScanResult]] = {}
+        #: Co se v ``meta.json`` nepodařilo přečíst — podle id šablony.
+        #: Uložením takové šablony by se poškozená část nenávratně zahodila.
+        self.load_problems: dict[str, list[str]] = {}
 
     def rebind(self, root: Path | None = None) -> None:
         """Přepne knihovnu na jinou složku (uživatel změnil umístění dat)."""
 
         self.root = Path(root) if root is not None else config.templates_dir()
         self._scan_cache.clear()
+        self.load_problems.clear()
 
     # -- cesty ---------------------------------------------------------
     def _validate_id(self, template_id: str) -> str:
@@ -257,11 +370,13 @@ class TemplateStore:
             except ConfigError:
                 # poškozenou šablonu jen přeskočíme, aplikace musí jet dál
                 continue
+            problems: list[str] = []
             try:
-                meta = _meta_from_data(data, entry.name)
+                meta = _meta_from_data(data, entry.name, problems)
             except StoreError:
                 # poškozenou šablonu jen přeskočíme, aplikace musí jet dál
                 continue
+            self._remember_problems(meta.id, problems)
             items.append(meta)
 
         items.sort(key=_sort_key)
@@ -275,7 +390,16 @@ class TemplateStore:
             raise StoreError(str(exc)) from exc
         if not isinstance(data, Mapping):
             raise TemplateNotFound(f"Šablona „{template_id}“ nebyla nalezena.")
-        return _meta_from_data(data, self._validate_id(template_id))
+        problems: list[str] = []
+        meta = _meta_from_data(data, self._validate_id(template_id), problems)
+        self._remember_problems(meta.id, problems)
+        return meta
+
+    def _remember_problems(self, template_id: str, problems: Sequence[str]) -> None:
+        if problems:
+            self.load_problems[template_id] = list(problems)
+        else:
+            self.load_problems.pop(template_id, None)
 
     def read_docx(self, template_id: str) -> bytes:
         path = self.docx_path(template_id)
@@ -318,6 +442,100 @@ class TemplateStore:
             ) from exc
         self._scan_cache[template_id] = (stamp[0], stamp[1], result)
         return result
+
+    # -- ověření vazby mapování na dokument ------------------------------
+    def scan_path(self, template_id: str) -> Path:
+        return self.template_dir(template_id) / SCAN_FILE_NAME
+
+    def _write_scan_snapshot(self, template_id: str, scan: ScanResult) -> None:
+        """Uloží snímek analýzy i otisk souboru — podklad pro ``verify_mapping``."""
+
+        try:
+            data = self.docx_path(template_id).read_bytes()
+        except OSError:
+            return
+        payload = {
+            "sha1": hashlib.sha1(data).hexdigest(),
+            "size": len(data),
+            "scan": scan.to_dict(),
+        }
+        try:
+            write_json_atomic(self.scan_path(template_id), payload)
+        except ConfigError:
+            # snímek je jen pojistka navíc; jeho selhání nesmí zabránit uložení
+            pass
+
+    def verify_mapping(self, meta: TemplateMeta) -> MappingCheck:
+        """Ověří, že uložené mapování pořád míří tam, kam má.
+
+        ``Placeholder.id`` obsahuje pořadové číslo odstavce, takže po úpravě
+        šablony ve Wordu se id posunou — a může se stát, že staré id připadne
+        JINÉMU místu dokumentu se stejným textem. Hodnota by se pak tiše
+        zapsala do špatné pasáže. Proto se vedle mapování drží snímek analýzy
+        a porovnává se s aktuálním stavem souboru.
+        """
+
+        snapshot = read_json(self.scan_path(meta.id), default=None, strict=False)
+        try:
+            data = self.docx_path(meta.id).read_bytes()
+        except OSError:
+            return MappingCheck()
+        digest = hashlib.sha1(data).hexdigest()
+        if isinstance(snapshot, Mapping) and snapshot.get("sha1") == digest:
+            return MappingCheck()
+
+        mapped = [pid for spec in meta.fields for pid in spec.placeholder_ids]
+        if not isinstance(snapshot, Mapping):
+            # bez snímku (starší knihovna) nemáme s čím porovnávat
+            return MappingCheck(changed=True)
+
+        try:
+            before = ScanResult.from_dict(snapshot.get("scan") or {})
+        except (AttributeError, TypeError, ValueError):  # pragma: no cover
+            return MappingCheck(changed=True)
+        try:
+            now = self.scan(meta.id)
+        except StoreError:  # pragma: no cover - rozbitou šablonu řeší volající
+            return MappingCheck(changed=True)
+
+        stale: list[str] = []
+        suspect: list[str] = []
+        for pid in mapped:
+            current = now.placeholder(pid)
+            if current is None:
+                stale.append(pid)
+                continue
+            original = before.placeholder(pid)
+            if original is None:
+                continue
+            if _placeholder_fingerprint(now, current) != _placeholder_fingerprint(
+                before, original
+            ):
+                suspect.append(pid)
+        known = set(mapped)
+        new_ids = [ph.id for ph in now.placeholders if ph.id not in known]
+
+        parts: list[str] = []
+        if stale:
+            parts.append(f"{_plural_fields(len(stale))} už nemá své místo v dokumentu")
+        if suspect:
+            parts.append(f"{_plural_fields(len(suspect))} nejspíš míří jinam")
+        if new_ids:
+            parts.append(f"{_plural_places(len(new_ids))} není přiřazeno k žádnému poli")
+        message = ""
+        if parts:
+            message = (
+                f"Šablona „{meta.name}“ byla od posledního mapování upravena: "
+                + ", ".join(parts)
+                + ". Zkontrolujte prosím pole šablony."
+            )
+        return MappingCheck(
+            changed=True,
+            stale_ids=tuple(stale),
+            suspect_ids=tuple(suspect),
+            new_ids=tuple(new_ids),
+            message=message,
+        )
 
     def invalidate_scan(self, template_id: str | None = None) -> None:
         if template_id is None:
@@ -391,6 +609,7 @@ class TemplateStore:
                 optional_paragraphs=optional_paragraphs,
             )
             self._write_meta(meta)
+            self._write_scan_snapshot(template_id, scan)
         except StoreError:
             if created:
                 self._remove_dir(target_dir)
@@ -417,6 +636,11 @@ class TemplateStore:
             raise TemplateNotFound(f"Šablona „{meta.id}“ nebyla nalezena.")
         meta.updated_at = _now_iso()
         self._write_meta(meta)
+        try:
+            self._write_scan_snapshot(meta.id, self.scan(meta.id))
+        except StoreError:
+            # bez snímku se jen příště nemá s čím porovnávat
+            pass
 
     def _write_meta(self, meta: TemplateMeta) -> None:
         try:

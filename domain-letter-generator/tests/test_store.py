@@ -513,3 +513,122 @@ def test_import_real_sample_with_real_engine(st):
     keys = [f.key for f in meta.fields]
     assert len(set(keys)) == len(keys)
     assert st.scan(meta.id) is st.scan(meta.id)
+
+
+# ---------------------------------------------------------------------------
+# poškozený meta.json nesmí sebrat celé mapování
+# ---------------------------------------------------------------------------
+def _meta_soubor(st: TemplateStore, data: dict) -> str:
+    directory = st.root / "vyzva-abc123"
+    directory.mkdir(parents=True, exist_ok=True)
+    (directory / "template.docx").write_bytes(b"PK\x03\x04")
+    (directory / "meta.json").write_text(
+        json.dumps(data, ensure_ascii=False), encoding="utf-8"
+    )
+    return "vyzva-abc123"
+
+
+def test_vadna_polozka_v_fields_nesmaze_zdrava_pole(st: TemplateStore) -> None:
+    tid = _meta_soubor(
+        st,
+        {
+            "id": "vyzva-abc123",
+            "name": "Výzva",
+            "tags": ["a"],
+            "fields": [
+                {"key": "jmeno", "label": "Jméno", "placeholder_ids": ["ph_1"]},
+                None,
+                {"key": "psc", "label": "PSČ", "placeholder_ids": ["ph_2"]},
+            ],
+            "optional_paragraphs": [{"paragraph_id": "pg_1", "label": "Smír"}],
+        },
+    )
+
+    meta = st.get(tid)
+    assert [f.key for f in meta.fields] == ["jmeno", "psc"]
+    assert [p.paragraph_id for p in meta.optional_paragraphs] == ["pg_1"]
+    assert meta.tags == ["a"]
+    assert st.load_problems[tid], "ztráta se musí dát ohlásit uživateli"
+    assert any("Pole šablony" in note for note in st.load_problems[tid])
+
+
+def test_vadny_klic_tags_nesmi_smazat_pole(st: TemplateStore) -> None:
+    tid = _meta_soubor(
+        st,
+        {
+            "id": "vyzva-abc123",
+            "name": "Výzva",
+            "tags": 7,
+            "fields": [{"key": "jmeno", "label": "Jméno"}],
+        },
+    )
+
+    meta = st.get(tid)
+    assert [f.key for f in meta.fields] == ["jmeno"]
+    assert meta.tags == []
+    assert st.load_problems[tid]
+
+
+def test_fields_jako_slovnik_se_zachrani(st: TemplateStore) -> None:
+    tid = _meta_soubor(
+        st,
+        {
+            "id": "vyzva-abc123",
+            "name": "Výzva",
+            "fields": {"jmeno": {"key": "jmeno", "label": "Jméno"}},
+        },
+    )
+
+    meta = st.get(tid)
+    assert [f.key for f in meta.fields] == ["jmeno"]
+    assert st.list()[0].fields[0].key == "jmeno"
+
+
+def test_zdrava_sablona_zadny_problem_nehlasi(
+    st: TemplateStore, source_docx: Path, scanner
+) -> None:
+    meta = st.import_docx(source_docx, "Výzva")
+    st.get(meta.id)
+    assert st.load_problems.get(meta.id) is None
+
+
+# ---------------------------------------------------------------------------
+# ověření vazby mapování na dokument (šablona upravená ve Wordu)
+# ---------------------------------------------------------------------------
+def test_verify_mapping_mlci_u_nezmenene_sablony(
+    st: TemplateStore, source_docx: Path
+) -> None:
+    meta = st.import_docx(source_docx, "Výzva")
+    kontrola = st.verify_mapping(meta)
+    assert kontrola.changed is False
+    assert kontrola.ok
+    assert kontrola.message == ""
+
+
+def test_verify_mapping_odhali_prevtelene_id(st: TemplateStore, tmp_path: Path) -> None:
+    """Po smazání odstavců může staré id připadnout jinému místu dokumentu."""
+
+    zdroj = make_docx(
+        tmp_path / "v1.docx",
+        ("Věc", "Adresa klienta:", "Nová 1", "[Praha]", "Příslušný soud:", "[Praha]"),
+    )
+    meta = st.import_docx(zdroj, "Výzva")
+    scan = st.scan(meta.id)
+    mesto, soud = scan.placeholders[0], scan.placeholders[1]
+    meta.fields = [
+        FieldSpec(key="mesto", label="Město klienta", placeholder_ids=[mesto.id]),
+        FieldSpec(key="soud", label="Sídlo soudu", placeholder_ids=[soud.id]),
+    ]
+    st.save_meta(meta)
+    assert st.verify_mapping(st.get(meta.id)).ok
+
+    # uživatel ve Wordu smaže dva řádky adresního bloku
+    make_docx(st.docx_path(meta.id), ("Věc", "[Praha]", "Příslušný soud:", "[Praha]"))
+    st.invalidate_scan(meta.id)
+
+    kontrola = st.verify_mapping(st.get(meta.id))
+    assert kontrola.changed is True
+    assert not kontrola.ok
+    assert mesto.id in kontrola.suspect_ids  # id přežilo, ale ukazuje jinam
+    assert soud.id in kontrola.stale_ids
+    assert "upravena" in kontrola.message

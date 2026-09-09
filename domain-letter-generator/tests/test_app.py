@@ -616,3 +616,88 @@ def test_main_hlasi_neuspesny_start(
     monkeypatch.setattr(app_module, "App", rozbity_start)
     assert app_module.main() == 1
     assert app_module.START_FAILED_MESSAGE in capsys.readouterr().err
+
+
+def test_main_hlasi_start_i_bez_stderru(
+    home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Pod ``console=False`` je ``sys.stderr`` None — hláška nesmí zmizet."""
+
+    def rozbity_start(**kwargs: Any) -> None:
+        raise RuntimeError("něco se pokazilo")
+
+    monkeypatch.setattr(app_module, "App", rozbity_start)
+    monkeypatch.setattr(app_module, "_show_fatal_dialog", lambda _text: None)
+    monkeypatch.setattr(app_module.sys, "stderr", None)
+    monkeypatch.setattr(app_module.sys, "stdout", None)
+
+    assert app_module.main() == 1
+
+    log = home / app_module.START_ERROR_LOG_NAME
+    assert log.is_file()
+    obsah = log.read_text(encoding="utf-8")
+    assert app_module.START_FAILED_MESSAGE in obsah
+    assert "něco se pokazilo" in obsah
+
+
+def test_main_hlasi_chybejici_tkinter_i_do_logu(
+    home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def bez_tkinteru() -> None:
+        raise ImportError("No module named 'tkinter'")
+
+    monkeypatch.setattr(app_module, "_require_tkinter", bez_tkinteru)
+    monkeypatch.setattr(app_module, "_show_fatal_dialog", lambda _text: None)
+    monkeypatch.setattr(app_module.sys, "stderr", None)
+
+    assert app_module.main() == 1
+    obsah = (home / app_module.START_ERROR_LOG_NAME).read_text(encoding="utf-8")
+    assert "python3-tk" in obsah
+
+
+def test_app_prezije_necitelny_ukazatel_na_slozku(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Ukazatel uložený v ANSI nesmí shodit start (tichý pád .exe)."""
+
+    monkeypatch.delenv(config.ENV_HOME, raising=False)
+    monkeypatch.setenv("HOME", str(tmp_path / "profil"))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "profil" / ".config"))
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path / "profil"))
+    misto = config.location_path()
+    misto.parent.mkdir(parents=True, exist_ok=True)
+    misto.write_bytes('{"data_dir": "D:\\\\Šablony"}'.encode("cp1250"))
+
+    assert config.app_home() == config.default_app_home()  # po opravě read_json
+    store = app_module.App._make_store()
+    assert store.root.is_absolute()
+    assert app_module.App._make_history().path.is_absolute()
+
+
+def test_rozepsany_dopis_se_pri_zavreni_hlida(
+    app_se_sablonou: app_module.App, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Dvacet ručně vyplněných údajů klienta nesmí zmizet bez dotazu."""
+
+    app = app_se_sablonou
+    app.show_view(app_module.NAV_GENERATE)
+    app.update()
+
+    view = app.view(app_module.NAV_GENERATE)
+    assert view is not None and view.meta is not None
+    klic = next(f.key for f in view.meta.ordered_fields())
+    view.set_value(klic, "Jan Novák")
+    assert view.has_unsaved_input() is True
+
+    monkeypatch.setattr(widgets, "ask_yes_no", lambda *a, **k: False)
+    app.event_generate("<Control-q>")
+    app.update()
+    assert app.winfo_exists()
+
+    monkeypatch.setattr(widgets, "ask_yes_no", lambda *a, **k: True)
+    app.event_generate("<Control-q>")
+    try:
+        alive = bool(app.winfo_exists())
+    except tk.TclError:  # pragma: no cover - interpret Tk je pryč
+        alive = False
+    assert not alive

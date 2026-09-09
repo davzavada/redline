@@ -371,3 +371,53 @@ def test_help_mentions_useful_context():
 
     assert fields[0].help.startswith("Kontext:")
     assert "Vážený pane" in fields[0].help
+
+
+# ---------------------------------------------------------------------------
+# výplňová značka „[●]“ znamená pokaždé něco jiného
+# ---------------------------------------------------------------------------
+def test_vice_vyplnovych_znacek_nesplyne_do_jednoho_pole() -> None:
+    scan = scan_of(
+        ph(BULLET, order=0, context="Doménové jméno [●] bylo registrováno"),
+        ph(BULLET, order=1, context="ve lhůtě [●] pracovních dnů"),
+        ph(BULLET, order=2, context="na e-mailu [●]"),
+    )
+
+    fields = suggest_fields(scan)
+    assert [f.key for f in fields] == ["domena", "lhuta", "email"]
+    assert [f.placeholder_ids for f in fields] == [["ph_000"], ["ph_001"], ["ph_002"]]
+
+    hodnoty = apply_fields(fields, {"domena": "lego-shop.cz", "lhuta": "15", "email": "a@b.cz"})
+    assert hodnoty == {"ph_000": "lego-shop.cz", "ph_001": "15", "ph_002": "a@b.cz"}
+
+
+def test_vyplnove_znacky_se_stejnym_vyznamem_se_sluci() -> None:
+    scan = scan_of(
+        ph(BULLET, order=0, context="Doménové jméno [●] bylo registrováno"),
+        ph(BULLET, order=1, context="převod doménového jména [●] na klienta"),
+    )
+
+    (pole,) = suggest_fields(scan)
+    assert pole.key == "domena"
+    assert pole.placeholder_ids == ["ph_000", "ph_001"]
+
+
+def test_vyplnova_znacka_bez_kontextu_zustane_vlastnim_polem() -> None:
+    scan = scan_of(
+        ph(BULLET, order=0, context="… [●] …"),
+        ph(BULLET, order=1, context="jiná věta [●] bez nápovědy"),
+    )
+
+    fields = suggest_fields(scan)
+    assert len(fields) == 2
+    assert [f.key for f in fields] == ["pole_1", "pole_2"]
+
+
+def test_obsahove_placeholdery_se_dal_sluci_podle_vnitrku() -> None:
+    scan = scan_of(
+        ph("Jan Novák", order=0, context="Vážený pane [Jan Novák],"),
+        ph("Jan Novák", order=1, context="držitel [Jan Novák] byl vyzván"),
+    )
+
+    (pole,) = suggest_fields(scan)
+    assert pole.placeholder_ids == ["ph_000", "ph_001"]

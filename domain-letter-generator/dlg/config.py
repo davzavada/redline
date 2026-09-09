@@ -29,7 +29,7 @@ import sys
 import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any, Mapping, Sequence
 
 from .version import APP_ID, APP_NAME
 
@@ -42,6 +42,7 @@ __all__ = [
     "data_home_status",
     "default_app_home",
     "default_output_dir",
+    "describe_os_error",
     "has_data",
     "history_path",
     "load_settings",
@@ -107,7 +108,7 @@ def _as_path(raw: str) -> Path:
     return path
 
 
-def _describe_os_error(exc: OSError) -> str:
+def describe_os_error(exc: OSError) -> str:
     """Česky popíše, proč se souborová operace nepovedla."""
 
     code = getattr(exc, "errno", None)
@@ -119,10 +120,18 @@ def _describe_os_error(exc: OSError) -> str:
         return "disk je jen pro čtení"
     if code == errno.ENOENT:
         return "cílová složka neexistuje"
+    if code == errno.EFBIG:
+        return "soubor je pro tento disk příliš velký"
+    if code == errno.EIO:  # pragma: no cover - vadný disk nebo síť
+        return "při zápisu na disk došlo k chybě"
     if code == errno.EDQUOT:  # pragma: no cover - jen na síťových discích
         return "byla vyčerpána disková kvóta"
     strerror = getattr(exc, "strerror", None)
     return str(strerror) if strerror else str(exc)
+
+
+#: Zpětně kompatibilní název (funkce byla dřív privátní).
+_describe_os_error = describe_os_error
 
 
 def default_app_home() -> Path:
@@ -191,8 +200,8 @@ def portable_data_dir() -> Path | None:
     try:
         if not marker.is_file():
             return None
-        text = marker.read_text(encoding="utf-8-sig").strip()
-    except OSError:
+        text = marker.read_bytes().decode("utf-8-sig").strip()
+    except (OSError, UnicodeDecodeError):
         return None
 
     if not text:
@@ -388,6 +397,28 @@ def set_app_home(target: Path | str | None, *, move_existing: bool = False) -> P
 
     _check_writable(destination)
 
+    moved: list[tuple[Path, Path]] = []
+
+    def rollback() -> list[str]:
+        """Vrátí přesunuté položky zpět; vrací názvy těch, které se vrátit nedaly."""
+
+        stuck: list[str] = []
+        for src_entry, dst_entry in reversed(moved):
+            try:
+                shutil.move(str(dst_entry), str(src_entry))
+            except (OSError, shutil.Error):
+                stuck.append(dst_entry.name)
+        moved.clear()
+        return stuck
+
+    def stuck_note(stuck: Sequence[str]) -> str:
+        return (
+            f"Aplikace používá dál složku „{source}“, ale tyto položky zůstaly "
+            f"ve složce „{destination}“ a je potřeba je ručně vrátit: "
+            + ", ".join(stuck)
+            + "."
+        )
+
     if move_existing and Path(source).exists() and destination != source:
         if has_data(destination):
             raise ConfigError(
@@ -399,15 +430,39 @@ def set_app_home(target: Path | str | None, *, move_existing: bool = False) -> P
             src_entry = Path(source) / name
             if not src_entry.exists():
                 continue
+            dst_entry = Path(destination) / name
             try:
-                shutil.move(str(src_entry), str(Path(destination) / name))
-            except OSError as exc:
-                raise ConfigError(
-                    f"Položku „{name}“ se nepodařilo přesunout: "
-                    f"{_describe_os_error(exc)}. Data zůstala v původní složce."
-                ) from exc
+                # shutil.Error (např. při kopii přes svazky) není OSError
+                shutil.move(str(src_entry), str(dst_entry))
+            except (OSError, shutil.Error) as exc:
+                detail = (
+                    _describe_os_error(exc)
+                    if isinstance(exc, OSError)
+                    else str(exc)
+                )
+                stuck = rollback()
+                message = f"Položku „{name}“ se nepodařilo přesunout: {detail}. "
+                message += stuck_note(stuck) if stuck else "Data zůstala v původní složce."
+                raise ConfigError(message) from exc
+            moved.append((src_entry, dst_entry))
 
-    write_location(None if destination == default_app_home() else destination)
+    # Ukazatel je poslední krok transakce: kdyby se nezapsal, data už jsou
+    # v nové složce, ale aplikace by dál četla tu starou.
+    try:
+        write_location(None if destination == default_app_home() else destination)
+    except ConfigError as exc:
+        if not moved:
+            raise
+        stuck = rollback()
+        if stuck:
+            raise ConfigError(
+                f"Novou složku s daty se nepodařilo zapamatovat ({exc}) a data se "
+                "nepodařilo vrátit zpět. " + stuck_note(stuck)
+            ) from exc
+        raise ConfigError(
+            f"Novou složku s daty se nepodařilo zapamatovat ({exc}). "
+            f"Data jsem vrátil zpět do složky „{source}“."
+        ) from exc
     return destination
 
 
@@ -519,7 +574,7 @@ def read_json(path: Path, default: Any = None, *, strict: bool = True) -> Any:
 
     path = Path(path)
     try:
-        text = path.read_text(encoding="utf-8")
+        raw = path.read_bytes()
     except FileNotFoundError:
         return default
     except OSError as exc:
@@ -529,9 +584,22 @@ def read_json(path: Path, default: Any = None, *, strict: bool = True) -> Any:
             f"Soubor „{path}“ se nepodařilo přečíst: {_describe_os_error(exc)}."
         ) from exc
 
+    # Dekódování musí být ve vlastním bloku: UnicodeDecodeError je potomek
+    # ValueError, ne OSError, takže by jinak proletěl ven i při strict=False.
+    # „utf-8-sig“ navíc snese BOM, který do souboru přidá Poznámkový blok
+    # nebo PowerShell; pro soubor bez BOM se chová jako obyčejné UTF-8.
+    try:
+        text = raw.decode("utf-8-sig")
+    except UnicodeDecodeError as exc:
+        if not strict:
+            return default
+        raise ConfigError(
+            f"Soubor „{path}“ je poškozený (není uložený v kódování UTF-8): {exc}."
+        ) from exc
+
     try:
         return json.loads(text)
-    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+    except json.JSONDecodeError as exc:
         if not strict:
             return default
         raise ConfigError(f"Soubor „{path}“ je poškozený (neplatný JSON): {exc}.") from exc

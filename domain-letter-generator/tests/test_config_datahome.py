@@ -221,3 +221,90 @@ def test_popis_stavu_je_cesky_a_srozumitelny(tmp_path):
     assert "Výchozí" in config.data_home_status().description
     config.set_app_home(tmp_path / "moje")
     assert "ručně" in config.data_home_status().description
+
+
+# ---------------------------------------------------------------------------
+# stěhování je transakce — po chybě je stav konzistentní a hláška pravdivá
+# ---------------------------------------------------------------------------
+def _pripravit_data(puvodni: Path) -> None:
+    (puvodni / "templates" / "vyzva-abc123").mkdir(parents=True)
+    (puvodni / "templates" / "vyzva-abc123" / "template.docx").write_bytes(b"PK\x03\x04data")
+    config.write_json_atomic(puvodni / "settings.json", {"open_after_generate": False})
+    config.write_json_atomic(puvodni / "history.json", {"domena": ["lego-shop.cz"]})
+
+
+def test_selhany_presun_vrati_uz_prestehovane_zpet(tmp_path, monkeypatch):
+    """Padne-li druhá položka, nesmí první zůstat v cizí složce."""
+
+    puvodni = config.app_home()
+    _pripravit_data(puvodni)
+    cil = tmp_path / "D" / "Dopisy"
+
+    import shutil as _shutil
+
+    puvodni_move = config.shutil.move
+
+    def rozbity_move(src, dst):
+        if Path(src).name == "settings.json" and Path(dst).parent == cil:
+            raise PermissionError(13, "Permission denied")
+        return puvodni_move(src, dst)
+
+    monkeypatch.setattr(config.shutil, "move", rozbity_move)
+
+    with pytest.raises(config.ConfigError) as chyba:
+        config.set_app_home(cil, move_existing=True)
+
+    assert "Data zůstala v původní složce" in str(chyba.value)
+    assert (puvodni / "templates" / "vyzva-abc123" / "template.docx").is_file()
+    assert not any((cil / name).exists() for name in config.DATA_ENTRIES)
+    assert not config.location_path().exists()
+    assert config.data_home_status().source == "default"
+    assert config.app_home() == puvodni
+    del _shutil
+
+
+def test_selhany_rollback_vyjmenuje_co_zustalo(tmp_path, monkeypatch):
+    puvodni = config.app_home()
+    _pripravit_data(puvodni)
+    cil = tmp_path / "D" / "Dopisy"
+
+    puvodni_move = config.shutil.move
+
+    def rozbity_move(src, dst):
+        if Path(src).name == "settings.json" and Path(dst).parent == cil:
+            raise PermissionError(13, "Permission denied")
+        if Path(dst).name == "templates" and Path(dst).parent == puvodni:
+            raise PermissionError(13, "Permission denied")  # rollback neprojde
+        return puvodni_move(src, dst)
+
+    monkeypatch.setattr(config.shutil, "move", rozbity_move)
+
+    with pytest.raises(config.ConfigError) as chyba:
+        config.set_app_home(cil, move_existing=True)
+
+    zprava = str(chyba.value)
+    assert "Data zůstala v původní složce" not in zprava
+    assert "templates" in zprava
+    assert str(cil) in zprava
+    assert config.app_home() == puvodni
+
+
+def test_selhany_zapis_ukazatele_vrati_data_zpet(tmp_path, monkeypatch):
+    """Data nesmí zůstat v nové složce, když aplikace míří na starou."""
+
+    puvodni = config.app_home()
+    _pripravit_data(puvodni)
+    cil = tmp_path / "D" / "Dopisy"
+
+    def rozbity_zapis(path):
+        raise config.ConfigError("Do složky nejde zapisovat.")
+
+    monkeypatch.setattr(config, "write_location", rozbity_zapis)
+
+    with pytest.raises(config.ConfigError) as chyba:
+        config.set_app_home(cil, move_existing=True)
+
+    assert "zapamatovat" in str(chyba.value)
+    assert (puvodni / "templates" / "vyzva-abc123" / "template.docx").is_file()
+    assert (puvodni / "settings.json").is_file()
+    assert not any((cil / name).exists() for name in config.DATA_ENTRIES)

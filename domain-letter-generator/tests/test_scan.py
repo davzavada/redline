@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from conftest import requires_sample
-from dlg.docx_engine import scan_docx
+from dlg.docx_engine import extract_text, scan_docx
 from dlg.docx_engine.parts import DocxPackage, is_scannable_part, sort_parts
 from dlg.docx_engine.scan import analyse_part, build_context, split_options
 from fixtures import (
@@ -125,9 +125,19 @@ def test_odstavec_v_textovem_poli_ma_vlastni_text() -> None:
     texts = [p.text for p in result.paragraphs]
     # vnější odstavec textové pole nepohltí
     assert "" in texts
-    assert texts.count("[Uvnitř pole]") == 2  # mc:Choice i mc:Fallback
+    # mc:Fallback je jen kopie pro staré prohlížeče — uživateli se odstavec
+    # nabídne jednou, ale vyplnit se musí obě větve
+    assert texts.count("[Uvnitř pole]") == 1
     assert [p.raw for p in result.placeholders] == ["[Uvnitř pole]", "[Uvnitř pole]"]
     assert result.placeholders[0].id != result.placeholders[1].id
+
+
+def test_nahled_textoveho_pole_neni_zdvojeny() -> None:
+    body = textbox(text_paragraph("Kontakt: [telefon]"))
+    docx = make_docx(document_xml(body))
+    assert extract_text(docx).count("Kontakt: [telefon]") == 1
+    # obě větve ale zůstávají mezi placeholdery, ať je fill vyplní
+    assert len(scan_docx(docx).placeholders) == 2
 
 
 # ---------------------------------------------------------------------------

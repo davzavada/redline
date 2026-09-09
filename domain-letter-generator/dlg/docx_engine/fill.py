@@ -14,7 +14,15 @@ from typing import Iterable, Mapping
 from ..models import FillReport
 from . import xmlsplice
 from .parts import MAIN_PART, DocxPackage
-from .scan import Hit, ParagraphView, PartView, analyse_package, analyse_part, preview_text
+from .scan import (
+    ALTERNATE_BRANCHES,
+    Hit,
+    ParagraphView,
+    PartView,
+    analyse_package,
+    analyse_part,
+    preview_text,
+)
 from .xmlsplice import Node, Splicer
 
 __all__ = ["fill_docx", "extract_text", "render_value"]
@@ -23,9 +31,27 @@ _LINE_BREAK = '</w:t><w:br/><w:t xml:space="preserve">'
 _ALLOWED_CONTROL = ("\t", "\n")
 
 
+def _xml_safe(ch: str) -> bool:
+    """Smí znak podle produkce ``Char`` z XML 1.0 vůbec být v dokumentu?
+
+    Word odmítne otevřít .docx, ve kterém je znak mimo tento rozsah — a text
+    s U+FFFE nebo s osamoceným surrogátem se do XML nedostane ani jako entita.
+    Hodnoty přitom chodí z formuláře, z profilu i z historie, kam se takový
+    znak snadno dostane přes schránku.
+    """
+
+    code = ord(ch)
+    return (
+        code in (0x09, 0x0A)  # \t a \n (\r se výš normalizuje na \n)
+        or 0x20 <= code <= 0xD7FF  # pod surrogáty
+        or 0xE000 <= code <= 0xFFFD  # nad surrogáty, bez U+FFFE a U+FFFF
+        or code >= 0x10000  # astrální roviny (emoji apod.)
+    )
+
+
 def _clean(value: str) -> str:
     text = value.replace("\r\n", "\n").replace("\r", "\n")
-    return "".join(ch for ch in text if ch >= " " or ch in _ALLOWED_CONTROL)
+    return "".join(ch for ch in text if _xml_safe(ch))
 
 
 def render_value(value: str) -> bytes:
@@ -106,12 +132,41 @@ def _needs_preserve(text: str) -> bool:
     return bool(text) and (text[0].isspace() or text[-1].isspace())
 
 
-def _write_value(state: _PartState, hit: Hit, value: str, *, clear_highlight: bool) -> None:
+def _drop_sdt_extra(state: _PartState, hit: Hit, report: FillReport) -> None:
+    """Zahodí zbývající odstavce víceodstavcového ``w:sdtContent``.
+
+    Placeholder kotví v prvním odstavci content-controlu. Po rozbalení ``w:sdt``
+    by se ze zbytku (typicky „Klikněte a zvolte…“) stal natvrdo zapsaný text
+    dopisu, proto ho odstraníme a napíšeme to do protokolu.
+    """
+
+    for paragraph in hit.sdt_extra:
+        node = paragraph.node
+        if node.start in state.dropped_paragraphs:
+            continue
+        if state.inside_deleted(node.start, node.end):
+            continue
+        state.dropped_paragraphs.add(node.start)
+        state.splicer.delete(node.start, node.end)
+        state.mark_deleted(node.start, node.end)
+        if paragraph.info.id not in report.dropped_paragraphs:
+            report.dropped_paragraphs.append(paragraph.info.id)
+
+
+def _write_value(
+    state: _PartState,
+    hit: Hit,
+    value: str,
+    *,
+    clear_highlight: bool,
+    report: FillReport,
+) -> None:
     segments = hit.paragraph.segments(hit.start, hit.end)
     if not segments:
         return
     first = segments[0]
     _unwrap_sdt(state, first.ref.node)
+    _drop_sdt_extra(state, hit, report)
     state.splicer.replace(first.byte_start, first.byte_end, render_value(value))
     for segment in segments[1:]:
         state.splicer.delete(segment.byte_start, segment.byte_end)
@@ -133,6 +188,72 @@ def _write_value(state: _PartState, hit: Hit, value: str, *, clear_highlight: bo
         _clear_highlight(state, hit.paragraph, hit)
 
 
+#: Kontejnery, které podle OOXML musí obsahovat aspoň jeden ``w:p``.
+#: Kdyby v nich žádný nezůstal, Word soubor prohlásí za poškozený.
+_KEEP_ONE_PARAGRAPH = ("w:tc", "w:txbxContent")
+
+
+def _keep_one_container(node: Node) -> Node | None:
+    """Nejbližší předek, který musí obsahovat aspoň jeden ``w:p``."""
+
+    for ancestor in node.ancestors():
+        if ancestor.tag in _KEEP_ONE_PARAGRAPH:
+            return ancestor
+    return None
+
+
+def _own_paragraphs(container: Node) -> list[Node]:
+    """Odstavce patřící přímo tomuto kontejneru (ne vnořené buňce/rámečku).
+
+    Hledá se mezi *potomky*, ne mezi přímými dětmi — jediný odstavec buňky
+    bývá zabalený v blokovém ``w:sdt`` nebo v ``mc:AlternateContent``.
+    """
+
+    return [
+        child
+        for child in container.iter_descendants("w:p")
+        if _keep_one_container(child) is container
+    ]
+
+
+def _alternate_twins(
+    paragraph: ParagraphView, by_node: Mapping[int, ParagraphView]
+) -> list[ParagraphView]:
+    """Tentýž odstavec v ostatních větvích ``mc:AlternateContent``.
+
+    Word píše obsah textového pole dvakrát (``mc:Choice`` i ``mc:Fallback``).
+    Vypustit jen jednu větev by dokument rozdvojilo — podle toho, kdo ho
+    otevře, by text buď byl, nebo nebyl.
+    """
+
+    branch: Node | None = None
+    for ancestor in paragraph.node.ancestors():
+        if ancestor.tag in ALTERNATE_BRANCHES:
+            branch = ancestor
+            break
+    if branch is None or branch.parent is None:
+        return []
+    parent = branch.parent
+    if parent.tag != "mc:AlternateContent":
+        return []
+    own = [node.start for node in branch.iter_descendants("w:p")]
+    try:
+        position = own.index(paragraph.node.start)
+    except ValueError:  # pragma: no cover - nemělo by nastat
+        return []
+    out: list[ParagraphView] = []
+    for sibling in parent.children:
+        if sibling is branch or sibling.tag not in ALTERNATE_BRANCHES:
+            continue
+        others = list(sibling.iter_descendants("w:p"))
+        if len(others) != len(own):
+            continue
+        twin = by_node.get(others[position].start)
+        if twin is not None:
+            out.append(twin)
+    return out
+
+
 def _drop_paragraphs(
     view: PartView,
     state: _PartState,
@@ -142,6 +263,14 @@ def _drop_paragraphs(
     selected = [p for p in view.paragraphs if p.info.id in drop_ids]
     if not selected:
         return
+    by_node = {paragraph.node.start: paragraph for paragraph in view.paragraphs}
+    # obě větve mc:AlternateContent musí zmizet společně
+    seen = {paragraph.node.start for paragraph in selected}
+    for paragraph in list(selected):
+        for twin in _alternate_twins(paragraph, by_node):
+            if twin.node.start not in seen:
+                seen.add(twin.node.start)
+                selected.append(twin)
     # odstavec zanořený v jiném mazaném odstavci se řeší sám sebou
     selected = [
         paragraph
@@ -152,27 +281,52 @@ def _drop_paragraphs(
         )
     ]
     chosen = {paragraph.node.start for paragraph in selected}
+    reported: set[str] = set()
     for paragraph in selected:
         node = paragraph.node
         state.dropped_paragraphs.add(node.start)
-        report.dropped_paragraphs.append(paragraph.info.id)
-        cell = node.closest("w:tc")
+        if paragraph.info.id in drop_ids:
+            report.dropped_paragraphs.append(paragraph.info.id)
+        props = node.child("w:pPr")
+        ends_section = props is not None and props.child("w:sectPr") is not None
+        container = _keep_one_container(node)
         keep_empty = False
-        if cell is not None:
-            siblings = [child for child in cell.children if child.tag == "w:p"]
-            if siblings and all(child.start in chosen for child in siblings):
-                keep_empty = node.start == siblings[-1].start
+        message = ""
+        if container is not None and not any(
+            other is not paragraph and other.node.contains(container)
+            for other in selected
+        ):
+            own = _own_paragraphs(container)
+            if own and all(child.start in chosen for child in own):
+                keep_empty = node.start == own[-1].start
+                if keep_empty:
+                    where = (
+                        "v buňce tabulky"
+                        if container.tag == "w:tc"
+                        else "v textovém poli"
+                    )
+                    message = (
+                        f"Odstavec „{_short(paragraph.info.text)}“ je poslední "
+                        f"{where}, proto byl jen vyprázdněn."
+                    )
+        if not keep_empty and ends_section:
+            # Se značkou odstavce by zmizel i w:sectPr, a s ním vzhled stránky,
+            # záhlaví i zápatí celé předchozí sekce. Radši prázdný odstavec.
+            keep_empty = True
+            message = (
+                f"Odstavec „{_short(paragraph.info.text)}“ ukončuje sekci dokumentu "
+                "(vlastní vzhled stránky, záhlaví a zápatí), proto byl jen "
+                "vyprázdněn a nastavení sekce zůstalo zachováno."
+            )
         if keep_empty:
-            props = node.child("w:pPr")
             start = props.end if props is not None else node.inner_start
             end = node.inner_end
             if end > start:
                 state.splicer.delete(start, end)
             state.mark_deleted(start, end)
-            report.warnings.append(
-                f"Odstavec „{_short(paragraph.info.text)}“ je poslední v buňce tabulky, "
-                "proto byl jen vyprázdněn."
-            )
+            if message and message not in reported:
+                reported.add(message)
+                report.warnings.append(message)
         else:
             state.splicer.delete(node.start, node.end)
             state.mark_deleted(node.start, node.end)
@@ -196,10 +350,13 @@ def _fill_part(
         node = hit.paragraph.node
         if node.start in state.dropped_paragraphs or state.inside_deleted(node.start, node.end):
             if value.strip():
-                report.warnings.append(
+                message = (
                     f"Hodnota pro „{_short(placeholder.inner, 40)}“ se nepoužila — "
                     "odstavec byl z dokumentu vypuštěn."
                 )
+                # obě větve mc:AlternateContent jsou totéž místo dokumentu
+                if message not in report.warnings:
+                    report.warnings.append(message)
             continue
         if not value.strip():
             report.unfilled.append(placeholder.id)
@@ -208,7 +365,9 @@ def _fill_part(
             value = ""
         else:
             report.filled.append(placeholder.id)
-        _write_value(state, hit, value, clear_highlight=clear_highlight)
+        _write_value(
+            state, hit, value, clear_highlight=clear_highlight, report=report
+        )
     if not len(state.splicer):
         return None
     return state.splicer.apply()

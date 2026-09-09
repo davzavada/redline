@@ -50,6 +50,7 @@ __all__ = [
     "NAV_ITEMS",
     "NAV_SETTINGS",
     "NAV_TEMPLATES",
+    "START_ERROR_LOG_NAME",
     "TK_MISSING_MESSAGE",
     "WINDOW_FILE_NAME",
     "app_icon_path",
@@ -480,8 +481,8 @@ class App(tk.Tk):
     ) -> None:
         super().__init__(**kwargs)
 
-        self.store = store if store is not None else TemplateStore()
-        self.history = history if history is not None else ValueHistory()
+        self.store = store if store is not None else self._make_store()
+        self.history = history if history is not None else self._make_history()
         self._settings = settings if settings is not None else self._load_settings()
 
         self._views: dict[str, ttk.Frame] = {}
@@ -564,6 +565,22 @@ class App(tk.Tk):
     # ------------------------------------------------------------------
     # nastavení
     # ------------------------------------------------------------------
+    @staticmethod
+    def _make_store() -> TemplateStore:
+        """Knihovna šablon. Rozbité umístění dat nesmí zabránit startu."""
+
+        try:
+            return TemplateStore()
+        except Exception:  # noqa: BLE001 - nečitelný location.json apod.
+            return TemplateStore(config.default_app_home() / config.TEMPLATES_DIR_NAME)
+
+    @staticmethod
+    def _make_history() -> ValueHistory:
+        try:
+            return ValueHistory()
+        except Exception:  # noqa: BLE001
+            return ValueHistory(config.default_app_home() / config.HISTORY_FILE_NAME)
+
     def _load_settings(self) -> Settings:
         try:
             return config.load_settings()
@@ -806,9 +823,13 @@ class App(tk.Tk):
             elif key == NAV_GENERATE:
                 view.refresh_templates()
                 if template_id and view.template_id != template_id:
-                    view.load(template_id)
+                    # i tudy se dá přijít o rozepsaný formulář
+                    if view.confirm_discard("Přepnutím na jinou šablonu o ně přijdete."):
+                        view.load(template_id)
                 elif not view.template_id:
                     view.load()
+                # výstupní složka se mohla mezitím změnit v Nastavení
+                view.update_output_hint()
                 if view.template_id:
                     self.remember_template(view.template_id)
             elif key == NAV_SETTINGS:
@@ -1102,6 +1123,14 @@ class App(tk.Tk):
             except tk.TclError:  # pragma: no cover
                 pass
         view = self.view(NAV_GENERATE)
+        if view is not None:
+            try:
+                if not view.confirm_discard(
+                    "Opravdu chcete aplikaci zavřít a rozepsaný dopis zahodit?"
+                ):
+                    return False
+            except tk.TclError:  # pragma: no cover
+                pass
         if view is not None and view.busy:
             return widgets.ask_yes_no(
                 self,
@@ -1163,6 +1192,87 @@ def _require_tkinter() -> None:
     import tkinter.ttk  # noqa: F401
 
 
+#: Soubor, do kterého se zapíše důvod neúspěšného startu (stdio pod
+#: ``console=False`` neexistuje, takže hláška nemá kam jinam jít).
+START_ERROR_LOG_NAME = "start-error.log"
+
+
+def _show_fatal_dialog(text: str) -> None:
+    """Poslední pokus o zobrazení hlášky přes Tk (mimo Windows).
+
+    Vlastní funkce záměrně: modální okno by v testech zastavilo běh, proto
+    se dá podstrčit. V ostrém provozu je to poslední záchrana pro uživatele,
+    který spustil program bez konzole.
+    """
+
+    try:  # pragma: no cover - modální okno se v testech neotevírá
+        import tkinter as _tk
+        from tkinter import messagebox as _mb
+
+        root = _tk.Tk()
+        root.withdraw()
+        try:
+            _mb.showerror(f"{APP_NAME} — spuštění se nezdařilo", text, parent=root)
+        finally:
+            root.destroy()
+    except Exception:  # noqa: BLE001 - hlášení chyby nesmí vyrobit další chybu
+        pass
+
+
+def _fatal(message: str, detail: str = "") -> None:
+    """Oznámí selhání startu i tam, kde ``sys.stderr`` neexistuje.
+
+    Zabalené ``.exe`` běží s ``console=False``, takže CPython nastaví
+    ``sys.stdout`` i ``sys.stderr`` na ``None`` a ``print`` tiše nic neudělá.
+    Uživatel by po dvojkliku viděl jen bliknutí procesu. Proto se hláška
+    zkusí doručit několika cestami po sobě — a žádná z nich nesmí vyrobit
+    další chybu.
+    """
+
+    text = message if not detail else f"{message}\n\nPodrobnosti:\n{detail}"
+
+    # 1) standardní chybový výstup, když existuje (konzole, `python -m dlg`, testy)
+    on_stderr = False
+    try:
+        if sys.stderr is not None:
+            print(text, file=sys.stderr)
+            on_stderr = True
+    except Exception:  # noqa: BLE001 - hlášení chyby nesmí vyrobit další chybu
+        pass
+
+    # 2) log do datové složky, ať jsou podrobnosti dohledatelné i zpětně
+    try:
+        from datetime import datetime
+
+        path = config.app_home() / START_ERROR_LOG_NAME
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("a", encoding="utf-8") as fh:
+            stamp = datetime.now().isoformat(timespec="seconds")
+            fh.write(f"--- {stamp} ---\n{text}\n")
+    except Exception:  # noqa: BLE001
+        pass
+
+    # 3) nativní okno Windows — funguje i bez tkinteru a bez Tcl/Tk
+    if sys.platform.startswith("win"):
+        try:  # pragma: no cover - jen na Windows
+            import ctypes
+            from ctypes import wintypes
+
+            box = ctypes.windll.user32.MessageBoxW  # type: ignore[attr-defined]
+            box.argtypes = (wintypes.HWND, wintypes.LPCWSTR, wintypes.LPCWSTR, wintypes.UINT)
+            box.restype = ctypes.c_int
+            # MB_OK | MB_ICONERROR | MB_SETFOREGROUND | MB_TOPMOST
+            box(None, text[:4000], f"{APP_NAME} — spuštění se nezdařilo", 0x10 | 0x10000 | 0x40000)
+            return
+        except Exception:  # noqa: BLE001
+            pass
+
+    # 4) poslední pokus jinde než na Windows — jen když hláška neměla kam jít
+    #    a Tk vůbec žije (v konzoli ji uživatel už vidí, okno by jen otravovalo)
+    if not on_stderr:
+        _show_fatal_dialog(text)
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     """Spustí aplikaci. Vrací návratový kód procesu (0 = v pořádku).
 
@@ -1175,7 +1285,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     try:
         _require_tkinter()
     except Exception:  # noqa: BLE001 - chybí tkinter nebo jeho nativní část
-        print(TK_MISSING_MESSAGE, file=sys.stderr)
+        _fatal(TK_MISSING_MESSAGE)
         return 1
 
     theme.enable_dpi_awareness()
@@ -1183,11 +1293,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     try:
         app = App()
     except tk.TclError as exc:
-        print(f"{DISPLAY_MISSING_MESSAGE}\nPodrobnosti: {exc}", file=sys.stderr)
+        _fatal(DISPLAY_MISSING_MESSAGE, str(exc))
         return 1
-    except Exception as exc:  # noqa: BLE001 - uživateli nesmí zůstat jen traceback
-        print(f"{START_FAILED_MESSAGE}\nPodrobnosti: {exc}", file=sys.stderr)
-        traceback.print_exc()
+    except Exception:  # noqa: BLE001 - uživateli nesmí zůstat jen traceback
+        _fatal(START_FAILED_MESSAGE, traceback.format_exc())
         return 1
 
     try:
@@ -1197,9 +1306,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             app.destroy()
         except Exception:  # noqa: BLE001
             pass
-    except Exception as exc:  # noqa: BLE001 - poslední záchranná síť
-        print(f"{START_FAILED_MESSAGE}\nPodrobnosti: {exc}", file=sys.stderr)
-        traceback.print_exc()
+    except Exception:  # noqa: BLE001 - poslední záchranná síť
+        _fatal(START_FAILED_MESSAGE, traceback.format_exc())
         return 1
     return 0
 

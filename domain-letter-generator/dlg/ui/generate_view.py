@@ -4,9 +4,12 @@ Vlevo je dynamický formulář poskládaný podle ``TemplateMeta.ordered_fields(
 vpravo živý náhled výsledného textu. Náhled se přepočítává se zpožděním
 (:data:`PREVIEW_DELAY_MS`) po poslední změně, aby psaní neseklo.
 
-Samotné generování běží ve vlákně (:func:`dlg.ui.widgets.run_in_thread`), po
-dobu běhu jsou tlačítka zakázaná. Vyplněné hodnoty se ukládají do historie,
-takže je příště nabídne našeptávač.
+Sestavení dopisu (`fill_docx` nad celým balíčkem) je u delší šablony práce na
+stovky ms, proto běží ve vlákně (:func:`dlg.ui.widgets.run_in_thread`) — jak
+při generování (po dobu běhu jsou tlačítka zakázaná), tak při přepočtu náhledu
+po pauze v psaní. Do vlákna jde jen čistý snímek formuláře (:meth:`_snapshot`),
+nikdy widgety. Vyplněné hodnoty se ukládají do historie, takže je příště
+nabídne našeptávač — dosazují se ale nikdy samy, viz :meth:`default_value`.
 
 Použití z :mod:`dlg.app`::
 
@@ -22,6 +25,7 @@ import inspect
 import os
 import subprocess
 import sys
+import tempfile
 import tkinter as tk
 from datetime import date
 from pathlib import Path
@@ -68,6 +72,44 @@ def _invoke(callback: Callable[..., Any] | None, *args: Any) -> Any:
     except TypeError:
         return callback()
     return callback(*args)
+
+
+def _describe_error(exc: BaseException) -> str:
+    """České vysvětlení chyby — hlášky operačního systému jsou anglicky."""
+
+    if isinstance(exc, OSError):
+        return config.describe_os_error(exc).capitalize() + "."
+    return str(exc)
+
+
+def _save_docx(directory: Path, stem: str, payload: bytes) -> Path:
+    """Uloží dopis atomicky — buď je celý, nebo ve složce nezůstane nic.
+
+    Zápis přímo do cílového souboru by při plném disku nebo odpojeném síťovém
+    disku nechal ve složce nedopsaný ``.docx``, který Word neotevře, a další
+    pokus by vedle něj vyrobil „… (2).docx“.
+    """
+
+    config.ensure_dir(directory)
+    target = naming.unique_path(directory, stem, ".docx")
+    handle, tmp_name = tempfile.mkstemp(dir=str(directory), prefix=".dlg-", suffix=".part")
+    tmp = Path(tmp_name)
+    try:
+        with os.fdopen(handle, "wb") as fh:
+            fh.write(payload)
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.replace(tmp, target)
+    except OSError as exc:
+        try:
+            tmp.unlink()
+        except OSError:  # pragma: no cover - dočasný soubor už není
+            pass
+        raise config.ConfigError(
+            f"Dopis „{target.name}“ se nepodařilo uložit: "
+            f"{config.describe_os_error(exc)}."
+        ) from exc
+    return target
 
 
 class _Status:
@@ -177,7 +219,15 @@ class GenerateView(ttk.Frame):
         self._specs: list[FieldSpec] = []
         self._paragraph_vars: list[tuple[str, tk.BooleanVar]] = []
         self._preview_job: str | None = None
+        #: Varování, že uložené mapování už nemusí sedět na upravenou šablonu.
+        self._mapping_warning = ""
+        #: Pořadí náhledu — starší výsledek z vlákna nesmí přepsat novější.
+        self._preview_seq = 0
         self._filename_touched = False
+        self._filename_auto = ""
+        #: Stav formuláře, ve kterém byl postavený — proti němu se pozná,
+        #: co do něj vyplnil uživatel a co je jen předvyplněná výchozí hodnota.
+        self._baseline: tuple[dict[str, str], dict[str, bool]] = ({}, {})
         self._busy = False
         self._loading = False
 
@@ -348,8 +398,13 @@ class GenerateView(ttk.Frame):
 
     def _on_template_selected(self, _event: Any = None) -> None:
         template_id = self._display_to_id.get(self.template_var.get(), "")
-        if template_id and template_id != self.template_id:
-            self.load(template_id)
+        if not template_id or template_id == self.template_id:
+            return
+        if not self.confirm_discard("Přepnutím na jinou šablonu o ně přijdete."):
+            # v comboboxu musí zůstat šablona, která je opravdu načtená
+            self.refresh_templates(select=self.template_id)
+            return
+        self.load(template_id)
 
     # ------------------------------------------------------------------
     # načtení šablony a stavba formuláře
@@ -363,9 +418,13 @@ class GenerateView(ttk.Frame):
         if not template_id:
             if not self._templates:
                 self.refresh_templates()
+            # Kandidáty je nutné porovnat se skutečnou knihovnou: naposledy
+            # použitá šablona mohla být smazaná (i mimo aplikaci) a pokus
+            # o její načtení by při každém startu vyskočil s chybovým oknem.
+            known = {m.id for m in self._templates}
             settings = self.settings()
             candidates = [settings.last_template_id] + [m.id for m in self._templates]
-            template_id = next((c for c in candidates if c), "")
+            template_id = next((c for c in candidates if c and c in known), "")
         if not template_id:
             self._clear_form("V knihovně zatím není žádná šablona. Nahrajte ji v části Šablony.")
             return False
@@ -384,6 +443,7 @@ class GenerateView(ttk.Frame):
         self.scan = scan
         self._docx = docx
         self._filename_touched = False
+        self._mapping_warning = self._check_mapping(meta)
         self.refresh_templates(select=meta.id)
         self.description_label.configure(
             text=meta.description or f"Zdrojový soubor: {meta.source_filename or '—'}"
@@ -391,11 +451,59 @@ class GenerateView(ttk.Frame):
         self._build_form()
         self.update_filename()
         self.update_preview()
-        self.status.set(f"Šablona „{meta.name}“ je připravená k vyplnění.")
+        if self._mapping_warning:
+            self.status.error(self._mapping_warning)
+        else:
+            self.status.set(f"Šablona „{meta.name}“ je připravená k vyplnění.")
         return True
+
+    def _check_mapping(self, meta: TemplateMeta) -> str:
+        """Ověří, že uložená pole pořád míří tam, kam mají.
+
+        Šablonu jde upravit i mimo aplikaci (tlačítko „Otevřít složku“).
+        Protože ``Placeholder.id`` obsahuje pořadové číslo odstavce, může se
+        po smazání odstavců stát, že staré id připadne jinému místu dokumentu
+        — a hodnota by se tiše zapsala do špatné pasáže.
+        """
+
+        verify = getattr(self.store, "verify_mapping", None)
+        if not callable(verify):
+            return ""
+        try:
+            check = verify(meta)
+        except Exception:  # noqa: BLE001 - kontrola je pojistka, ne překážka
+            return ""
+        return str(getattr(check, "message", "") or "")
+
+    def has_unsaved_input(self) -> bool:
+        """Je ve formuláři něco, co vyplnil uživatel a co ještě nebylo použito?"""
+
+        if self.meta is None:
+            return False
+        base_values, base_paragraphs = self._baseline
+        for key, value in self.values().items():
+            if value.strip() and value != base_values.get(key, ""):
+                return True
+        return any(
+            bool(var.get()) != base_paragraphs.get(pid, True)
+            for pid, var in self._paragraph_vars
+        )
+
+    def confirm_discard(self, detail: str = "Opravdu je chcete zahodit?") -> bool:
+        """Dotaz před zahozením rozepsaného formuláře (``True`` = smí se zahodit)."""
+
+        if not self.has_unsaved_input():
+            return True
+        return widgets.ask_yes_no(
+            self,
+            "Ve formuláři máte rozepsané údaje.",
+            detail=detail,
+            title="Rozepsaný formulář",
+        )
 
     def _clear_form(self, message: str) -> None:
         self.meta = None
+        self._mapping_warning = ""
         self.scan = None
         self._docx = b""
         self._fields = {}
@@ -410,6 +518,7 @@ class GenerateView(ttk.Frame):
         self._set_preview_text("", ())
         self.unfilled_label.configure(text="")
         self.filename_var.set("")
+        self._filename_auto = ""
 
     def _build_form(self) -> None:
         assert self.meta is not None
@@ -468,6 +577,11 @@ class GenerateView(ttk.Frame):
                     variable.trace_add("write", lambda *_a: self._on_form_change())
                     self._paragraph_vars.append((op.paragraph_id, variable))
                     row += 1
+
+            self._baseline = (
+                self.values(),
+                {pid: bool(var.get()) for pid, var in self._paragraph_vars},
+            )
         finally:
             self._loading = False
 
@@ -530,10 +644,13 @@ class GenerateView(ttk.Frame):
             return []
 
     def default_value(self, spec: FieldSpec, settings: Any = None) -> str:
-        """Výchozí hodnota pole: profil > ``FieldSpec.default`` > historie.
+        """Výchozí hodnota pole: profil > ``FieldSpec.default`` > u data dnešek.
 
-        U data se místo staré hodnoty z historie nabídne dnešek — datum
-        z minulého dopisu by byl vždycky špatně.
+        Historie se **nedosazuje**. Nabízí ji našeptávač, ale předvyplnit
+        jméno a doménu z minulého dopisu by znamenalo, že projde i kontrola
+        povinných polí a aplikace ohlásí „vše vyplněno“ — výzva by pak odešla
+        na jméno předchozího klienta. Trvalé výchozí hodnoty patří do profilu
+        v Nastavení, kde si je uživatel nastaví vědomě.
         """
 
         settings = self.settings() if settings is None else settings
@@ -544,8 +661,7 @@ class GenerateView(ttk.Frame):
             return spec.default
         if spec.type == "date":
             return widgets.format_date(date.today())
-        suggestions = self._suggestions(spec.key)
-        return suggestions[0] if suggestions else ""
+        return ""
 
     # ------------------------------------------------------------------
     # hodnoty formuláře
@@ -615,13 +731,49 @@ class GenerateView(ttk.Frame):
         self._preview_job = None
 
     def _run_preview(self) -> None:
+        """Přepočet po pauze v psaní — u delší šablony trvá stovky ms.
+
+        Proto běží ve vlákně: hlavní vlákno musí zůstat volné, jinak by se
+        okno při každé pauze v psaní zaseklo. Výsledek staršího běhu se
+        zahodí, aby nepřepsal novější náhled.
+        """
+
         self._preview_job = None
-        self.update_preview()
+        if self.meta is None or not self._docx:
+            self.update_preview()
+            return
+        try:
+            snapshot = self._snapshot()
+        except Exception as exc:  # noqa: BLE001 - náhled nesmí shodit aplikaci
+            self._set_preview_text(f"Náhled se nepodařilo sestavit: {exc}", ())
+            return
+        self._preview_seq += 1
+        generation = self._preview_seq
+
+        def work() -> tuple[FillReport, str, list[str]]:
+            filled, report, inserted = self._build(snapshot)
+            return report, extract_text(filled), inserted
+
+        def done(result: tuple[FillReport, str, list[str]]) -> None:
+            if generation != self._preview_seq:
+                return  # mezitím přišel novější náhled
+            report, text, inserted = result
+            self._set_preview_text(text, sorted(inserted, key=len, reverse=True))
+            self._show_unfilled(report)
+
+        def failed(exc: BaseException) -> None:
+            if generation != self._preview_seq:
+                return
+            self._set_preview_text(f"Náhled se nepodařilo sestavit: {exc}", ())
+            self.unfilled_label.configure(text="")
+
+        widgets.run_in_thread(self, work, done, failed, name="dlg-preview")
 
     def update_preview(self) -> None:
         """Přepočítá náhled hned (bez čekání na zpoždění)."""
 
         self.cancel_preview()
+        self._preview_seq += 1  # výsledek běžícího vlákna už je neplatný
         if self.meta is None or not self._docx:
             self._set_preview_text("", ())
             self.unfilled_label.configure(text="")
@@ -639,21 +791,38 @@ class GenerateView(ttk.Frame):
         self._set_preview_text(text, sorted(inserted, key=len, reverse=True))
         self._show_unfilled(report)
 
-    def _fill(self) -> tuple[bytes, FillReport, list[str]]:
-        """Sestaví dopis z aktuálního formuláře. Vrací i dosazené hodnoty."""
+    def _snapshot(self) -> dict[str, Any]:
+        """Posbírá vše potřebné z widgetů — jediná část, která sahá na Tk."""
 
         assert self.meta is not None
         settings = self.settings()
-        values = mapping.apply_fields(self.meta.fields, self.values())
+        return {
+            "docx": self._docx,
+            "values": mapping.apply_fields(self.meta.fields, self.values()),
+            "drop": self.dropped_paragraph_ids(),
+            "clear_highlight": bool(getattr(settings, "clear_highlight", True)),
+            "keep_unfilled": bool(getattr(settings, "keep_unfilled", True)),
+        }
+
+    @staticmethod
+    def _build(snapshot: Mapping[str, Any]) -> tuple[bytes, FillReport, list[str]]:
+        """Sestaví dopis ze snímku formuláře. Nesahá na Tk — smí běžet ve vlákně."""
+
+        values = dict(snapshot["values"])
         filled, report = fill_docx(
-            self._docx,
+            snapshot["docx"],
             values,
-            drop_paragraphs=self.dropped_paragraph_ids(),
-            clear_highlight=bool(getattr(settings, "clear_highlight", True)),
-            keep_unfilled=bool(getattr(settings, "keep_unfilled", True)),
+            drop_paragraphs=snapshot["drop"],
+            clear_highlight=snapshot["clear_highlight"],
+            keep_unfilled=snapshot["keep_unfilled"],
         )
         inserted = sorted({v for v in values.values() if v.strip()})
         return filled, report, inserted
+
+    def _fill(self) -> tuple[bytes, FillReport, list[str]]:
+        """Sestaví dopis z aktuálního formuláře. Vrací i dosazené hodnoty."""
+
+        return self._build(self._snapshot())
 
     def preview_text(self) -> str:
         """Text, který je právě v náhledu (kvůli testům a app.py)."""
@@ -746,11 +915,43 @@ class GenerateView(ttk.Frame):
     # název souboru
     # ------------------------------------------------------------------
     def _on_filename_typed(self, _event: Any = None) -> None:
-        self._filename_touched = True
+        """Za ruční zásah se počítá jen skutečná změna textu.
+
+        ``<KeyRelease>`` chodí i pro šipky, Home/End a modifikátory a
+        ``<<Paste>>``/``<<Cut>>`` se doručí ještě před vložením textu — proto
+        se obsah pole porovnává až po zpracování události.
+        """
+
+        try:
+            self.after_idle(self._check_filename_edited)
+        except tk.TclError:  # pragma: no cover - okno zaniklo
+            self._check_filename_edited()
+
+    def _check_filename_edited(self) -> None:
+        try:
+            current = self.filename_var.get()
+        except tk.TclError:  # pragma: no cover - okno zaniklo
+            return
+        if current != self._filename_auto:
+            self._filename_touched = True
+
+    def update_output_hint(self) -> None:
+        """Osvěží popisek s cílovou složkou (nezávisle na názvu souboru).
+
+        Vlastní metoda schválně: při ručně zadaném názvu se ``update_filename``
+        vrací dřív, takže by se popisek po změně výstupní složky v Nastavení
+        už nikdy neopravil.
+        """
+
+        try:
+            self.output_label.configure(text=f"Uloží se do složky: {self.output_dir()}")
+        except tk.TclError:  # pragma: no cover
+            pass
 
     def update_filename(self, *, force: bool = False) -> str:
         """Přepočítá název souboru ze vzoru — dokud do pole uživatel nesáhl."""
 
+        self.update_output_hint()
         if self.meta is None:
             return ""
         if self._filename_touched and not force:
@@ -762,12 +963,9 @@ class GenerateView(ttk.Frame):
             today=date.today(),
         )
         self.filename_var.set(stem)
+        self._filename_auto = stem
         if force:
             self._filename_touched = False
-        try:
-            self.output_label.configure(text=f"Uloží se do složky: {self.output_dir()}")
-        except tk.TclError:  # pragma: no cover
-            pass
         return stem
 
     def filename_stem(self) -> str:
@@ -836,55 +1034,85 @@ class GenerateView(ttk.Frame):
             return False
 
         try:
-            filled, report, _values = self._fill()
+            snapshot = self._snapshot()
         except Exception as exc:  # noqa: BLE001
             self.status.error(str(exc))
             widgets.show_error(self, "Dopis se nepodařilo sestavit.", detail=str(exc))
             return False
 
-        remaining = self.unfilled_placeholders(report)
-        if remaining:
-            listed = ", ".join(remaining[:MAX_LISTED_UNFILLED])
-            if len(remaining) > MAX_LISTED_UNFILLED:
-                listed += f" a další ({len(remaining) - MAX_LISTED_UNFILLED})"
-            if not widgets.ask_yes_no(
-                self,
-                f"V dokumentu zůstane {widgets.plural_places(len(remaining))} nevyplněných.",
-                detail=f"Konkrétně: {listed}\n\nChcete dopis přesto vygenerovat?",
-                title="Nevyplněná místa",
-                default_yes=True,
-            ):
-                self.status.set("Generování zrušeno.")
-                return False
-
         settings = self.settings()
         directory = self.output_dir()
         stem = self.filename_stem()
         values = self.values()
+        warning = self._mapping_warning
         should_open = (
             bool(getattr(settings, "open_after_generate", True))
             if open_after is None
             else bool(open_after)
         )
 
-        def work() -> Path:
-            config.ensure_dir(directory)
-            target = naming.unique_path(directory, stem, ".docx")
-            target.write_bytes(filled)
-            return target
-
-        def done(path: Path) -> None:
-            self._finish(path, report, values, should_open)
-
-        def failed(exc: BaseException) -> None:
+        def build_failed(exc: BaseException) -> None:
             self._set_busy(False)
             self.status.idle()
             self.status.error(str(exc))
-            widgets.show_error(self, "Dopis se nepodařilo uložit.", detail=str(exc))
+            widgets.show_error(self, "Dopis se nepodařilo sestavit.", detail=str(exc))
 
+        def built(result: tuple[bytes, FillReport, list[str]]) -> None:
+            filled, report, _inserted = result
+            remaining = self.unfilled_placeholders(report)
+            question: list[str] = []
+            if warning:
+                question.append(warning)
+            if remaining:
+                listed = ", ".join(remaining[:MAX_LISTED_UNFILLED])
+                if len(remaining) > MAX_LISTED_UNFILLED:
+                    listed += f" a další ({len(remaining) - MAX_LISTED_UNFILLED})"
+                question.append(f"Konkrétně: {listed}")
+            if question:
+                headline = (
+                    f"V dokumentu zůstane {widgets.plural_places(len(remaining))} nevyplněných."
+                    if remaining
+                    else "Šablona se od posledního mapování změnila."
+                )
+                question.append("Chcete dopis přesto vygenerovat?")
+                if not widgets.ask_yes_no(
+                    self,
+                    headline,
+                    detail="\n\n".join(question),
+                    title="Nevyplněná místa" if remaining else "Upravená šablona",
+                    default_yes=True,
+                ):
+                    self._set_busy(False)
+                    self.status.idle()
+                    self.status.set("Generování zrušeno.")
+                    return
+
+            def save() -> Path:
+                return _save_docx(directory, stem, filled)
+
+            def done(path: Path) -> None:
+                self._finish(path, report, values, should_open)
+
+            def failed(exc: BaseException) -> None:
+                self._set_busy(False)
+                self.status.idle()
+                detail = _describe_error(exc)
+                self.status.error(detail)
+                widgets.show_error(self, "Dopis se nepodařilo uložit.", detail=detail)
+
+            widgets.run_in_thread(self, save, done, failed, name="dlg-generate")
+
+        # Sestavení dopisu je u delší šablony práce na stovky ms — do vlákna
+        # patří celé, ne až samotný zápis souboru.
         self._set_busy(True)
         self.status.busy("Generuji dopis…")
-        widgets.run_in_thread(self, work, done, failed, name="dlg-generate")
+        widgets.run_in_thread(
+            self,
+            lambda: self._build(snapshot),
+            built,
+            build_failed,
+            name="dlg-fill",
+        )
         return True
 
     def _finish(
@@ -894,6 +1122,11 @@ class GenerateView(ttk.Frame):
         self.status.idle()
         self.last_output_path = Path(path)
         self.last_report = report
+        # hodnoty byly použité — zavření aplikace se na ně už ptát nemusí
+        self._baseline = (
+            self.values(),
+            {pid: bool(var.get()) for pid, var in self._paragraph_vars},
+        )
 
         if self.history is not None:
             try:

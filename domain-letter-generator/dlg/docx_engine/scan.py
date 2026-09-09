@@ -23,6 +23,7 @@ from .xmlsplice import Document, Node
 
 __all__ = [
     "TextRef",
+    "is_fallback_node",
     "Segment",
     "ParagraphView",
     "Hit",
@@ -95,6 +96,10 @@ class ParagraphView:
     text: str
     highlight: list[bool]
     info: ParagraphInfo
+    #: Odstavec leží v ``mc:Fallback``, ke kterému existuje i ``mc:Choice``.
+    #: Word vykreslí jen jednu větev, takže do náhledu ani do nabídky
+    #: volitelných odstavců patří jen ta hlavní — vyplňovat se ale musí obě.
+    in_fallback: bool = False
 
     def segments(self, start: int, end: int) -> list[Segment]:
         out: list[Segment] = []
@@ -123,6 +128,10 @@ class Hit:
     start: int
     end: int
     sdt: Node | None = None
+    #: Další odstavce téhož ``w:sdtContent`` (víceodstavcový content-control).
+    #: Kotvou placeholderu je první odstavec; zbytek se při vyplnění zahodí,
+    #: jinak by vzorový text šablony zůstal v hotovém dopise.
+    sdt_extra: tuple[ParagraphView, ...] = ()
 
 
 @dataclass
@@ -157,6 +166,29 @@ def _run_is_highlighted(run: Node | None) -> bool:
         return False
     value = highlight.get("w:val")
     return value not in ("none", "")
+
+
+#: Větve ``mc:AlternateContent`` — Word do nich zapisuje TÝŽ obsah dvakrát.
+ALTERNATE_BRANCHES = ("mc:Choice", "mc:Fallback")
+
+
+def is_fallback_node(node: Node) -> bool:
+    """Leží uzel v ``mc:Fallback``, ke kterému existuje i ``mc:Choice``?
+
+    Textové pole Word ukládá dvakrát: jednou moderně (``mc:Choice``) a jednou
+    jako VML (``mc:Fallback``). Vyplňovat se musí obě větve, ale uživateli se
+    smí ukázat jen jedna — jinak vidí text dokumentu dvakrát.
+    """
+
+    for ancestor in node.ancestors():
+        if ancestor.tag != "mc:Fallback":
+            continue
+        parent = ancestor.parent
+        if parent is None or parent.tag != "mc:AlternateContent":
+            continue
+        if any(child.tag == "mc:Choice" for child in parent.children):
+            return True
+    return False
 
 
 def _paragraph_style(paragraph: Node) -> str | None:
@@ -261,6 +293,7 @@ def _collect_paragraphs(part: str, doc: Document) -> list[ParagraphView]:
         view.highlight.extend([_run_is_highlighted(run)] * len(text))
     result = [views[node.start] for node in order]
     for view in result:
+        view.in_fallback = is_fallback_node(view.node)
         view.info = ParagraphInfo(
             id=paragraph_id(part, view.index, view.text),
             part=part,
@@ -285,6 +318,7 @@ class _Candidate:
     raw: str
     inner: str
     sdt: Node | None = None
+    extra_paragraphs: tuple[ParagraphView, ...] = ()
 
 
 def _sdt_qualifies(sdt: Node) -> bool:
@@ -297,7 +331,29 @@ def _sdt_qualifies(sdt: Node) -> bool:
     )
 
 
-def _sdt_candidates(doc: Document, by_node: dict[int, tuple[ParagraphView, TextRef]]) -> list[_Candidate]:
+def _content_paragraphs(content: Node) -> list[Node]:
+    """Odstavce, které patří přímo tomuto ``w:sdtContent`` (ne vnořenému rámečku)."""
+
+    out: list[Node] = []
+    for node in content.iter_descendants("w:p"):
+        nested = False
+        for ancestor in node.ancestors():
+            if ancestor is content:
+                break
+            if ancestor.tag == "w:p":
+                nested = True
+                break
+        if not nested:
+            out.append(node)
+    return out
+
+
+def _sdt_candidates(
+    doc: Document,
+    by_node: dict[int, tuple[ParagraphView, TextRef]],
+    by_paragraph: dict[int, ParagraphView] | None = None,
+) -> list[_Candidate]:
+    paragraphs = by_paragraph or {}
     out: list[_Candidate] = []
     for sdt in doc.iter("w:sdt"):
         if not _sdt_qualifies(sdt):
@@ -325,6 +381,17 @@ def _sdt_candidates(doc: Document, by_node: dict[int, tuple[ParagraphView, TextR
         raw = first_paragraph.text[start:end]
         if not raw.strip():
             continue
+        # Placeholder kotví v prvním odstavci (offsety i id jsou znakové
+        # a platí uvnitř jednoho odstavce). Zbývající odstavce téhož
+        # content-controlu si poznamenáme, aby je fill mohl zahodit —
+        # jinak by po rozbalení sdt zůstal vzorový text v dopise.
+        extra: list[ParagraphView] = []
+        for node in _content_paragraphs(content):
+            if node.start == first_paragraph.node.start:
+                continue
+            view = paragraphs.get(node.start)
+            if view is not None:
+                extra.append(view)
         out.append(
             _Candidate(
                 paragraph=first_paragraph,
@@ -334,6 +401,7 @@ def _sdt_candidates(doc: Document, by_node: dict[int, tuple[ParagraphView, TextR
                 raw=raw,
                 inner=raw,
                 sdt=sdt,
+                extra_paragraphs=tuple(extra),
             )
         )
     return out
@@ -441,8 +509,9 @@ def analyse_part(
         for ref in paragraph.refs:
             by_node[ref.node.start] = (paragraph, ref)
 
+    by_paragraph = {paragraph.node.start: paragraph for paragraph in paragraphs}
     sdt = sorted(
-        _sdt_candidates(doc, by_node),
+        _sdt_candidates(doc, by_node, by_paragraph),
         key=lambda c: (c.paragraph.index, c.start, -c.end),
     )
     mustache: list[_Candidate] = []
@@ -479,6 +548,7 @@ def analyse_part(
                 start=candidate.start,
                 end=candidate.end,
                 sdt=candidate.sdt,
+                sdt_extra=candidate.extra_paragraphs,
             )
         )
     return view
@@ -494,6 +564,8 @@ def preview_text(view: PartView) -> str:
 
     lines: list[str] = []
     for paragraph in view.paragraphs:
+        if paragraph.in_fallback:
+            continue  # tentýž text je i v mc:Choice — v náhledu jen jednou
         chunks: list[str] = []
         for node in paragraph.node.iter_descendants():
             if node.closest("w:p") is not paragraph.node:
@@ -526,6 +598,8 @@ def scan_docx(path_or_bytes: "Path | str | bytes") -> ScanResult:
     order = 0
     for view in analyse_package(package):
         for paragraph in view.paragraphs:
+            if paragraph.in_fallback:
+                continue  # dvojče z mc:Choice stačí nabídnout jednou
             info = paragraph.info
             result.paragraphs.append(
                 ParagraphInfo(

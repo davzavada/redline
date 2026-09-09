@@ -278,3 +278,47 @@ def test_os_error_description_is_czech():
     assert "oprávnění" in config._describe_os_error(OSError(errno.EACCES, "x"))
     assert config._describe_os_error(OSError(errno.EROFS, "x")) == "disk je jen pro čtení"
     assert os.name in ("posix", "nt")
+
+
+# ---------------------------------------------------------------------------
+# read_json: cizí kódování a BOM z Poznámkového bloku
+# ---------------------------------------------------------------------------
+def test_read_json_snese_bom_z_poznamkoveho_bloku(tmp_path):
+    """Poznámkový blok i PowerShell umí uložit „UTF-8 s BOM“."""
+
+    path = tmp_path / "settings.json"
+    path.write_text(json.dumps({"open_after_generate": False}), encoding="utf-8-sig")
+
+    assert config.read_json(path, strict=True) == {"open_after_generate": False}
+    assert config.load_settings(path).open_after_generate is False
+
+
+def test_read_location_snese_bom(tmp_path, monkeypatch):
+    monkeypatch.setattr(config, "location_path", lambda: tmp_path / "location.json")
+    (tmp_path / "location.json").write_text(
+        json.dumps({"data_dir": str(tmp_path / "Sablony")}), encoding="utf-8-sig"
+    )
+
+    assert config.read_location() == tmp_path / "Sablony"
+
+
+def test_read_json_nevalidni_utf8_nespadne_pri_strict_false(tmp_path):
+    """Soubor uložený v ANSI (cp1250) nesmí shodit start aplikace."""
+
+    path = tmp_path / "history.json"
+    path.write_bytes('{"values": {"drzitel": ["Novák"]}}'.encode("cp1250"))
+
+    assert config.read_json(path, default={"ok": 1}, strict=False) == {"ok": 1}
+    assert config.load_settings(path) == Settings(
+        output_dir=str(config.default_output_dir())
+    )
+
+
+def test_read_json_nevalidni_utf8_hlasi_cesky_pri_strict(tmp_path):
+    path = tmp_path / "meta.json"
+    path.write_bytes('{"id": "x-abc123", "name": "Výzva"}'.encode("cp1250"))
+
+    with pytest.raises(ConfigError) as chyba:
+        config.read_json(path, strict=True)
+    assert "kódování UTF-8" in str(chyba.value)
+    assert "Errno" not in str(chyba.value)

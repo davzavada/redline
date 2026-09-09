@@ -217,6 +217,8 @@ class MappingView(ttk.Frame):
         self._optional: dict[str, OptionalParagraph] = {}
         self._paragraph_rows: list[dict[str, Any]] = []
         self._snapshot: dict[str, Any] = {}
+        #: Co se v meta.json nepodařilo přečíst — uložení by to zahodilo.
+        self._load_problems: list[str] = []
         self._selected_index: int = -1
         self._loading = False
 
@@ -491,8 +493,43 @@ class MappingView(ttk.Frame):
             self._loading = False
 
         self._snapshot = self._current_snapshot()
-        self.status.set(f"Šablona „{meta.name}“ je připravená k úpravám.")
+        problems = list(getattr(self.store, "load_problems", {}).get(meta.id, []))
+        upravena = self._mapping_warning(meta)
+        if problems:
+            # Uložením by se poškozená část meta.json nenávratně přepsala,
+            # proto o ní uživatel musí vědět předem.
+            self._load_problems = problems
+            self.status.error(
+                "Část nastavení polí se nepodařilo přečíst — poškozené položky "
+                "byly vynechány."
+            )
+            widgets.show_warning(
+                self,
+                "Část nastavení polí se nepodařilo přečíst.",
+                detail="\n".join(problems)
+                + "\n\nPoškozené položky byly vynechány. Uložením se nenávratně "
+                "zahodí.",
+                title="Poškozené nastavení polí",
+            )
+        elif upravena:
+            self._load_problems = []
+            self.status.error(upravena)
+        else:
+            self._load_problems = []
+            self.status.set(f"Šablona „{meta.name}“ je připravená k úpravám.")
         return True
+
+    def _mapping_warning(self, meta: TemplateMeta) -> str:
+        """Sedí uložená pole ještě na dokument? (šablona jde upravit ve Wordu)"""
+
+        verify = getattr(self.store, "verify_mapping", None)
+        if not callable(verify):
+            return ""
+        try:
+            check = verify(meta)
+        except Exception:  # noqa: BLE001 - kontrola je pojistka, ne překážka
+            return ""
+        return str(getattr(check, "message", "") or "")
 
     # ------------------------------------------------------------------
     # tabulka polí
@@ -1135,6 +1172,15 @@ class MappingView(ttk.Frame):
         meta = self.build_meta()
         if meta is None:  # pragma: no cover - ošetřeno výš
             return False
+        if self._load_problems and not widgets.ask_yes_no(
+            self,
+            "Část původního nastavení polí se nepodařilo přečíst.",
+            detail="\n".join(self._load_problems)
+            + "\n\nUložením se tato část nenávratně zahodí. Chcete pokračovat?",
+            title="Poškozené nastavení polí",
+        ):
+            self.status.set("Uložení zrušeno.")
+            return False
         try:
             self.store.save_meta(meta)
         except Exception as exc:  # noqa: BLE001 - uživateli ukážeme hlášku
@@ -1143,6 +1189,7 @@ class MappingView(ttk.Frame):
             return False
 
         self.meta = meta
+        self._load_problems = []
         self._snapshot = self._current_snapshot()
         self.status.success(f"Pole šablony „{meta.name}“ jsou uložená.")
         if close:

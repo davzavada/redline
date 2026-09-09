@@ -472,10 +472,12 @@ def test_generate_view_postavi_formular(
     assert view.values()[datum.key] == widgets.format_date(__import__("datetime").date.today())
 
 
-def test_generate_view_vychozi_hodnoty_z_profilu_a_historie(
+def test_generate_view_vychozi_hodnoty_z_profilu_a_defaultu(
     root: tk.Tk, store: TemplateStore, history: ValueHistory, settings: config.Settings,
     template_id: str,
 ) -> None:
+    """Historie se jen našeptává. Dosadit ji by znamenalo dopis na cizí jméno."""
+
     meta = store.get(template_id)
     textova = [f for f in meta.ordered_fields() if f.type == "text"]
     z_profilu, z_defaultu, z_historie = textova[0], textova[1], textova[2]
@@ -492,10 +494,33 @@ def test_generate_view_vychozi_hodnoty_z_profilu_a_historie(
 
     assert hodnoty[z_profilu.key] == "Z profilu"
     assert hodnoty[z_defaultu.key] == "Výchozí z šablony"
-    assert hodnoty[z_historie.key] == "Z historie"
-    # našeptávač textového pole zná historii
+    assert hodnoty[z_historie.key] == ""
+    # našeptávač textového pole historii zná, jen ji sám nedosadí
     combobox = view._fields[z_historie.key].combobox  # type: ignore[union-attr]
     assert "Z historie" in combobox.completion_values()
+
+
+def test_generate_view_neprevezme_udaje_predchoziho_klienta(
+    root: tk.Tk, store: TemplateStore, history: ValueHistory, settings: config.Settings,
+    template_id: str,
+) -> None:
+    """Po vygenerování dopisu musí být formulář pro dalšího klienta prázdný."""
+
+    prvni = _generate_view(root, store, history, settings)
+    prvni.load(template_id)
+    _fill_everything(prvni)
+    prvni.generate()
+    assert _pump(root, lambda: prvni.last_output_path is not None)
+    prvni.destroy()
+
+    druhy = _generate_view(root, store, history, settings)
+    druhy.load(template_id)
+    textova = [
+        f.key for f in store.get(template_id).ordered_fields() if f.type == "text"
+    ]
+    assert all(druhy.values()[klic] == "" for klic in textova)
+    # a aplikace netvrdí, že je hotovo
+    assert druhy.validate_form(), "prázdná povinná pole musí kontrolu neprojít"
 
 
 def test_generate_view_nahled_se_prepocita_se_zpozdenim(
@@ -659,10 +684,17 @@ def test_generate_view_potvrzeni_nevyplnenych_mist(
         return False
 
     monkeypatch.setattr(widgets, "ask_yes_no", odmitnout)
-    assert view.generate() is False
+    # generate() vrací True = „práce se rozběhla“; dopis se skládá ve vlákně
+    # a na nevyplněná místa se aplikace ptá, až když je hotový
+    assert view.generate() is True
+    assert _pump(root, lambda: bool(dotazy))
+    assert _pump(root, lambda: view.busy is False)
     assert view.last_output_path is None
-    assert dotazy and "nevyplněných" in dotazy[0]
+    assert "nevyplněných" in dotazy[0]
     assert "[Jan Novák]" in dotazy[0]
+    assert not list(Path(settings.output_dir).glob("*.docx")) if Path(
+        settings.output_dir
+    ).exists() else True
 
 
 def test_generate_view_volitelny_odstavec_lze_vypustit(
@@ -836,3 +868,244 @@ def test_pohledy_snesou_status_bar_i_funkci(
     assert _pump(root, lambda: generator.last_output_path is not None)
     assert str(generator.last_output_path) in bar.label.cget("text")
     assert bar.label.cget("style") == "Uspech.TLabel"
+
+
+# ---------------------------------------------------------------------------
+# rozepsaný formulář, smazaná šablona, název souboru a cílová složka
+# ---------------------------------------------------------------------------
+def test_generate_view_se_pta_pred_zahozenim_formulare(
+    root: tk.Tk, store: TemplateStore, history: ValueHistory, settings: config.Settings,
+    template_id: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    druha = store.import_docx(
+        _build_template_docx(tmp_path / "druha.docx"), "Předžalobní výzva"
+    )
+    view = _generate_view(root, store, history, settings)
+    view.load(template_id)
+
+    # čerstvě načtený formulář se neptá — jsou v něm jen výchozí hodnoty
+    assert view.has_unsaved_input() is False
+
+    klic = next(f.key for f in view.meta.ordered_fields() if f.type == "text")
+    view.set_value(klic, "Jan Novák")
+    assert view.has_unsaved_input() is True
+
+    dotazy: list[str] = []
+
+    def odmitnout(_parent: Any, message: str = "", **kwargs: Any) -> bool:
+        dotazy.append(message)
+        return False
+
+    monkeypatch.setattr(widgets, "ask_yes_no", odmitnout)
+    view.template_var.set("Předžalobní výzva")
+    view.template_combo.event_generate("<<ComboboxSelected>>")
+    root.update()
+
+    assert dotazy and "rozepsané" in dotazy[0]
+    assert view.template_id == template_id
+    assert view.values()[klic] == "Jan Novák"
+    assert view.template_var.get() == "Výzva k nápravě"
+
+    monkeypatch.setattr(widgets, "ask_yes_no", lambda *a, **k: True)
+    view.template_var.set("Předžalobní výzva")
+    view.template_combo.event_generate("<<ComboboxSelected>>")
+    root.update()
+    assert view.template_id == druha.id
+
+
+def test_generate_view_smazana_posledni_sablona_nespadne(
+    root: tk.Tk, store: TemplateStore, history: ValueHistory, settings: config.Settings,
+    template_id: str, tmp_path: Path, bez_dialogu: dict[str, list[Any]],
+) -> None:
+    """Po smazání naposledy použité šablony se nabídne jiná, bez chybového okna."""
+
+    druha = store.import_docx(
+        _build_template_docx(tmp_path / "druha.docx"), "Předžalobní výzva"
+    )
+    settings.last_template_id = template_id
+    store.delete(template_id)
+
+    view = _generate_view(root, store, history, settings)
+    assert view.load() is True
+    assert view.template_id == druha.id
+    assert bez_dialogu["error"] == []
+
+
+def test_generate_view_ctecka_v_nazvu_souboru_nezmrazi_prepocet(
+    root: tk.Tk, store: TemplateStore, history: ValueHistory, settings: config.Settings,
+    template_id: str,
+) -> None:
+    """End ani Ctrl v poli s názvem nejsou úprava textu."""
+
+    meta = store.get(template_id)
+    klic = next(f.key for f in meta.ordered_fields() if f.type == "text")
+    meta.output_pattern = "vyzva_{%s}" % klic
+    store.save_meta(meta)
+
+    view = _generate_view(root, store, history, settings)
+    view.load(template_id)
+    view.set_value(klic, "stary-klient.cz")
+    assert view.filename_var.get() == "vyzva_stary-klient.cz"
+
+    view.filename_entry.focus_set()
+    for sekvence in ("<KeyRelease-End>", "<KeyRelease-Control_L>", "<KeyRelease-Left>"):
+        view.filename_entry.event_generate(sekvence)
+    root.update_idletasks()
+    root.update()
+    assert view._filename_touched is False
+
+    view.set_value(klic, "novy-klient.cz")
+    assert view.filename_var.get() == "vyzva_novy-klient.cz"
+
+    # skutečné přepsání textu se ale musí respektovat
+    view.filename_var.set("muj-vlastni-nazev")
+    view.filename_entry.event_generate("<KeyRelease>")
+    root.update_idletasks()
+    root.update()
+    view.set_value(klic, "jina-domena.cz")
+    assert view.filename_var.get() == "muj-vlastni-nazev"
+
+
+def test_generate_view_popisek_slozky_se_osvezi(
+    root: tk.Tk, store: TemplateStore, history: ValueHistory, settings: config.Settings,
+    template_id: str, tmp_path: Path,
+) -> None:
+    view = _generate_view(root, store, history, settings)
+    view.load(template_id)
+    assert str(settings.output_dir) in view.output_label.cget("text")
+
+    nova = tmp_path / "vystup_B"
+    settings.output_dir = str(nova)
+    view._filename_touched = True  # ruční název nesmí popisek zablokovat
+    view.update_output_hint()
+    assert str(nova) in view.output_label.cget("text")
+
+
+def test_generate_view_selhany_zapis_nenecha_zmetek(
+    root: tk.Tk, store: TemplateStore, history: ValueHistory, settings: config.Settings,
+    template_id: str, monkeypatch: pytest.MonkeyPatch,
+    bez_dialogu: dict[str, list[Any]],
+) -> None:
+    """Plný disk nesmí ve složce nechat nedopsaný .docx ani anglickou hlášku."""
+
+    view = _generate_view(root, store, history, settings)
+    view.load(template_id)
+    _fill_everything(view)
+
+    puvodni = gv.os.replace
+
+    def selze(src: Any, dst: Any) -> None:
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr(gv.os, "replace", selze)
+    view.generate()
+    assert _pump(root, lambda: bool(bez_dialogu["error"]))
+    assert _pump(root, lambda: view.busy is False)
+
+    hlaska = bez_dialogu["error"][-1]
+    assert "Errno" not in hlaska
+    assert "volného místa" in hlaska
+    slozka = Path(settings.output_dir)
+    assert list(slozka.glob("*")) == [], "po neúspěchu nesmí zůstat žádný soubor"
+
+    # po nápravě se dopis uloží pod původním názvem, ne jako „… (2)“
+    monkeypatch.setattr(gv.os, "replace", puvodni)
+    view.generate()
+    assert _pump(root, lambda: view.last_output_path is not None)
+    assert " (2)" not in view.last_output_path.name  # type: ignore[union-attr]
+
+
+def test_generate_view_varuje_pri_upravene_sablone(
+    root: tk.Tk, store: TemplateStore, history: ValueHistory, settings: config.Settings,
+    template_id: str, tmp_path: Path,
+) -> None:
+    """Šablona upravená ve Wordu — uložené mapování už nemusí sedět."""
+
+    hlasky: list[str] = []
+    view = gv.GenerateView(root, store, history, lambda: settings, hlasky.append)
+    view.pack(fill="both", expand=True)
+    view.load(template_id)
+    assert view._mapping_warning == ""
+
+    # uživatel upraví template.docx mimo aplikaci
+    _build_template_docx(tmp_path / "jina.docx")
+    docx = pytest.importorskip("docx")
+    dokument = docx.Document(str(tmp_path / "jina.docx"))
+    dokument.paragraphs[0].text = "Úplně jiný začátek dopisu"
+    dokument.save(str(store.docx_path(template_id)))
+    store.invalidate_scan(template_id)
+
+    view.load(template_id)
+    assert view._mapping_warning
+    assert "upravena" in view._mapping_warning
+    assert any("upravena" in h for h in hlasky)
+
+
+def test_mapping_view_upozorni_na_poskozene_nastaveni_poli(
+    root: tk.Tk, store: TemplateStore, template_id: str,
+    bez_dialogu: dict[str, list[Any]], monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Vadná položka v meta.json nesmí tiše zmizet při prvním uložení."""
+
+    import json
+
+    cesta = store.meta_path(template_id)
+    data = json.loads(cesta.read_text(encoding="utf-8"))
+    zdrava = list(data["fields"])
+    data["fields"] = [zdrava[0], None] + zdrava[1:]
+    cesta.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+
+    view = _mapping_view(root, store)
+    assert view.load(template_id) is True
+    assert len(view.field_specs()) == len(zdrava)
+    assert bez_dialogu["warning"] and "nepodařilo přečíst" in bez_dialogu["warning"][0]
+
+    # uložení se ptá, protože poškozenou část nenávratně přepíše
+    dotazy: list[str] = []
+
+    def odmitnout(_parent: Any, message: str = "", **kwargs: Any) -> bool:
+        dotazy.append(message)
+        return False
+
+    monkeypatch.setattr(widgets, "ask_yes_no", odmitnout)
+    assert view.save() is False
+    assert dotazy and "nepodařilo přečíst" in dotazy[0]
+
+
+def test_generate_view_nahled_po_psani_neblokuje_hlavni_vlakno(
+    root: tk.Tk, store: TemplateStore, history: ValueHistory, settings: config.Settings,
+    template_id: str,
+) -> None:
+    """Přepočet po pauze v psaní musí běžet ve vlákně, ne v Tk smyčce."""
+
+    view = _generate_view(root, store, history, settings)
+    view.load(template_id)
+    klic = next(f.key for f in view.meta.ordered_fields() if f.type == "text")
+
+    view.set_value(klic, "Novak-do-vlakna")
+    assert view._preview_job is not None
+    view.schedule_preview(delay=1)
+    assert _pump(root, lambda: view._preview_job is None)
+
+    # hned po odpálení plánu ještě náhled hotový není — počítá se jinde
+    assert "Novak-do-vlakna" not in view.preview_text()
+    assert _pump(root, lambda: "Novak-do-vlakna" in view.preview_text())
+
+
+def test_generate_view_starsi_nahled_neprepise_novejsi(
+    root: tk.Tk, store: TemplateStore, history: ValueHistory, settings: config.Settings,
+    template_id: str,
+) -> None:
+    view = _generate_view(root, store, history, settings)
+    view.load(template_id)
+    klic = next(f.key for f in view.meta.ordered_fields() if f.type == "text")
+
+    view.set_value(klic, "Prvni-hodnota")
+    view.schedule_preview(delay=1)
+    root.update()
+    view.set_value(klic, "Druha-hodnota")
+    view.schedule_preview(delay=1)
+
+    assert _pump(root, lambda: "Druha-hodnota" in view.preview_text())
+    root.update()
+    assert "Prvni-hodnota" not in view.preview_text()

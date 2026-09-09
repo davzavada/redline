@@ -556,3 +556,155 @@ def test_vicaradkova_hodnota_v_nahledu() -> None:
     docx = build(text_paragraph("[A]"))
     out, _ = fill_docx(docx, values_for(docx, {"[A]": "první\ndruhý"}))
     assert extract_text(out) == "první\ndruhý"
+
+
+# ---------------------------------------------------------------------------
+# vypuštění odstavce nesmí porušit strukturu dokumentu
+# ---------------------------------------------------------------------------
+
+def test_vypusteni_jedineho_odstavce_bunky_zabaleneho_v_sdt() -> None:
+    """Jediný ``w:p`` buňky bývá zabalený v blokovém ``w:sdt`` — i tak musí zůstat."""
+
+    cell = (
+        "<w:sdt><w:sdtPr><w:alias w:val=\"Pole\"/></w:sdtPr>"
+        "<w:sdtContent>" + text_paragraph("Buňka k vypuštění") + "</w:sdtContent></w:sdt>"
+    )
+    body = table([[[cell], [text_paragraph("vedle")]]])
+    docx = make_docx(document_xml(body))
+    scan = scan_docx(docx)
+    target = [p for p in scan.paragraphs if p.text == "Buňka k vypuštění"][0]
+
+    out, report = fill_docx(docx, {}, drop_paragraphs=[target.id])
+    text = assert_valid_xml(out)
+    assert "Buňka k vypuštění" not in text
+    # v buňce musí zůstat právě jeden odstavec, jinak Word soubor odmítne
+    cell_xml = text.split("<w:tc>")[1].split("</w:tc>")[0]
+    assert cell_xml.count("<w:p") == 1
+    assert any("buňce tabulky" in w for w in report.warnings)
+
+
+def test_vypusteni_jedineho_odstavce_textoveho_pole_jen_vyprazdni() -> None:
+    body = textbox(text_paragraph("Jediný odstavec rámečku")) + text_paragraph("zůstává")
+    docx = make_docx(document_xml(body))
+    scan = scan_docx(docx)
+    target = [p for p in scan.paragraphs if p.text == "Jediný odstavec rámečku"][0]
+
+    out, report = fill_docx(docx, {}, drop_paragraphs=[target.id])
+    text = assert_valid_xml(out)
+    assert "Jediný odstavec rámečku" not in text
+    assert "<w:txbxContent></w:txbxContent>" not in text
+    # obě větve mc:AlternateContent mají svůj prázdný odstavec
+    assert text.count("<w:txbxContent>") == 2
+    for chunk in text.split("<w:txbxContent>")[1:]:
+        inner = chunk.split("</w:txbxContent>")[0]
+        assert inner.count("<w:p") == 1
+    assert any("textovém poli" in w for w in report.warnings)
+    # varování se nehlásí dvakrát, i když se vyprazdňují dvě větve
+    assert len(report.warnings) == 1
+    # zůstal prázdný odstavec rámečku (vnější odstavec + rámeček + text)
+    assert extract_text(out) == "\n\nzůstává"
+
+
+def test_vypusteni_odstavce_v_textovem_poli_zasahne_obe_vetve() -> None:
+    """Vypuštění jedné větve by dokument rozdvojilo podle toho, kdo ho otevře."""
+
+    body = textbox(
+        text_paragraph("První v rámečku"), text_paragraph("Druhý v rámečku")
+    ) + text_paragraph("zůstává")
+    docx = make_docx(document_xml(body))
+    scan = scan_docx(docx)
+    # uživatel vidí odstavec jen jednou (mc:Fallback se nenabízí)
+    assert [p.text for p in scan.paragraphs].count("První v rámečku") == 1
+    target = [p for p in scan.paragraphs if p.text == "První v rámečku"][0]
+
+    out, report = fill_docx(docx, {}, drop_paragraphs=[target.id])
+    text = assert_valid_xml(out)
+    assert "První v rámečku" not in text
+    assert text.count("Druhý v rámečku") == 2  # mc:Choice i mc:Fallback
+    assert report.dropped_paragraphs == [target.id]
+
+
+def test_vypusteni_odstavce_se_sectpr_zachova_vzhled_sekce() -> None:
+    """S odstavcem by zmizel i ``w:sectPr`` — a s ním celý vzhled sekce."""
+
+    sect = (
+        "<w:sectPr>"
+        '<w:pgSz w:w="16838" w:h="11906" w:orient="landscape"/>'
+        '<w:headerReference r:id="rId10" w:type="default"/>'
+        "</w:sectPr>"
+    )
+    body = (
+        paragraph(run("Konec sekce na šířku"), ppr_extra=sect)
+        + text_paragraph("Další sekce")
+    )
+    docx = make_docx(document_xml(body))
+    scan = scan_docx(docx)
+    target = [p for p in scan.paragraphs if p.text == "Konec sekce na šířku"][0]
+
+    out, report = fill_docx(docx, {}, drop_paragraphs=[target.id])
+    text = assert_valid_xml(out)
+    assert "Konec sekce na šířku" not in text
+    assert "landscape" in text
+    assert "headerReference" in text
+    assert target.id in report.dropped_paragraphs
+    assert any("ukončuje sekci" in w for w in report.warnings)
+    assert extract_text(out) == "\nDalší sekce"
+
+
+# ---------------------------------------------------------------------------
+# hodnoty se znaky, které XML nepovoluje
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize(
+    "hodnota, ocekavano",
+    [
+        ("Novák￾", "Novák"),
+        ("A￿B", "AB"),
+        ("Novák\ud800x", "Novákx"),
+        ("Novák \U0001f600", "Novák \U0001f600"),
+    ],
+)
+def test_hodnota_se_zakazanym_znakem_da_platne_xml(hodnota: str, ocekavano: str) -> None:
+    docx = build(text_paragraph("Jméno: [jmeno]"))
+    out, report = fill_docx(docx, values_for(docx, {"[jmeno]": hodnota}))
+    assert_valid_xml(out)  # bez filtru by dokument nebyl well-formed
+    assert extract_text(out) == f"Jméno: {ocekavano}"
+    assert len(report.filled) == 1
+
+
+# ---------------------------------------------------------------------------
+# víceodstavcový content-control
+# ---------------------------------------------------------------------------
+
+def test_viceodstavcovy_sdt_nenecha_vzorovy_text_v_dopise() -> None:
+    sdt = (
+        "<w:sdt><w:sdtPr><w:showingPlcHdr/><w:alias w:val=\"Volba\"/></w:sdtPr>"
+        "<w:sdtContent>"
+        + text_paragraph("Klikněte a zvolte variantu A")
+        + text_paragraph("nebo variantu B")
+        + "</w:sdtContent></w:sdt>"
+    )
+    docx = make_docx(document_xml(text_paragraph("Vážený pane,") + sdt))
+    scan = scan_docx(docx)
+    (placeholder,) = [p for p in scan.placeholders if p.kind == "sdt"]
+
+    out, report = fill_docx(docx, {placeholder.id: "VYPLNĚNO"})
+    text = assert_valid_xml(out)
+    assert "nebo variantu B" not in text
+    assert extract_text(out) == "Vážený pane,\nVYPLNĚNO"
+    assert len(report.dropped_paragraphs) == 1
+
+
+def test_viceodstavcovy_sdt_zustane_nevyplneny_cely() -> None:
+    sdt = (
+        "<w:sdt><w:sdtPr><w:showingPlcHdr/></w:sdtPr><w:sdtContent>"
+        + text_paragraph("Klikněte a zvolte variantu A")
+        + text_paragraph("nebo variantu B")
+        + "</w:sdtContent></w:sdt>"
+    )
+    docx = make_docx(document_xml(sdt))
+    out, report = fill_docx(docx, {})
+    text = part_text(out)
+    assert "<w:sdt>" in text
+    assert "nebo variantu B" in text
+    assert report.dropped_paragraphs == []

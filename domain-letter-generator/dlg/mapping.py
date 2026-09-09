@@ -320,13 +320,29 @@ def guess_rule(
     return None
 
 
-def _group_key(placeholder: Placeholder) -> str:
-    """Klíč slučování: shodný vnitřek = jedno pole."""
+#: Výplňové značky bez vlastního významu („[●]“, „[...]“, „[…]“). Stejný
+#: vnitřek u nich neznamená stejný údaj — o významu rozhoduje až kontext.
+_GENERIC_INNER_RE = re.compile(rf"^(?:{BULLET}|\.{{3}}|…)$")
+
+
+def _is_generic_inner(inner: str) -> bool:
+    return bool(_GENERIC_INNER_RE.match(_normalize_space(inner)))
+
+
+def _group_key(placeholder: Placeholder, rule: "FieldRule | None" = None) -> str:
+    """Klíč slučování: shodný vnitřek = jedno pole.
+
+    Výplňová značka („[●]“) je výjimka: v jednom dopise bývá pro doménu,
+    lhůtu i e-mail zároveň. Slučovat ji podle vnitřku by znamenalo zapsat
+    doménu i do lhůty, proto se slučuje až podle rozpoznaného pravidla.
+    """
 
     normalized = _normalize_space(placeholder.inner)
     if not normalized:
         # prázdný vnitřek nelze rozumně sloučit — každý zůstane samostatně
         return "\x00" + placeholder.id
+    if _is_generic_inner(normalized):
+        return "\x00" + placeholder.id if rule is None else "\x01" + rule.key
     return normalized
 
 
@@ -383,25 +399,31 @@ def suggest_fields(scan: ScanResult) -> list[FieldSpec]:
         key=lambda p: (p.order, p.part, p.id),
     )
 
+    # Pravidlo se musí vyhodnotit pro KAŽDÝ placeholder zvlášť a teprve podle
+    # něj se slučuje — jinak by se pravidla „● + kontext“ nikdy neuplatnila.
     groups: dict[str, list[Placeholder]] = {}
+    rules: dict[str, FieldRule | None] = {}
     order: list[str] = []
+    previous_key = ""
     for ph in placeholders:
-        key = _group_key(ph)
+        rule = guess_rule(ph.inner, ph.context, ph.kind, previous_key)
+        previous_key = rule.key if rule is not None else ""
+        key = _group_key(ph, rule)
         if key not in groups:
             groups[key] = []
+            rules[key] = rule
             order.append(key)
         groups[key].append(ph)
 
     fields: list[FieldSpec] = []
     used_keys: set[str] = set()
     unknown_index = 0
-    previous_key = ""
 
     for position, group_key in enumerate(order):
         members = groups[group_key]
         first = members[0]
         context = next((m.context for m in members if m.context), "")
-        rule = guess_rule(first.inner, context, first.kind, previous_key)
+        rule = rules[group_key]
 
         ftype = _field_type(members, rule)
         options = _options_of(members) if ftype == "choice" else []
@@ -409,18 +431,15 @@ def suggest_fields(scan: ScanResult) -> list[FieldSpec]:
         if rule is not None:
             base_key = rule.key
             base_label = rule.label
-            previous_key = rule.key
         elif options:
             # Nerozpoznaná volba mezi variantami ("[A / B]"). Klíč „pole_3“ by
             # uživateli nic neřekl, „varianta“ aspoň napoví, oč jde.
             base_key = "varianta"
             base_label = _label_from_inner(first.inner)
-            previous_key = ""
         else:
             unknown_index += 1
             base_key = f"pole_{unknown_index}"
             base_label = _label_from_inner(first.inner)
-            previous_key = ""
 
         key, duplicate = _unique(base_key, used_keys)
         label = base_label if duplicate == 1 else f"{base_label} ({duplicate})"
