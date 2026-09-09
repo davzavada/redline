@@ -352,7 +352,9 @@ def _derive_font(root: tk.Misc, name: str, *, delta: int = 0, weight: str = "nor
                 font = tkfont.Font(root=root, name=name, exists=True)
             font.configure(**options)  # type: ignore[arg-type]
         else:
-            font = tkfont.Font(root=root, name=name, exists=False, **options)  # type: ignore[arg-type]
+            font = tkfont.Font(  # type: ignore[arg-type]
+                root=root, name=name, exists=False, **options
+            )
         registry[name] = font
     except Exception:
         return FONT_BASE
