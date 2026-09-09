@@ -627,7 +627,6 @@ class MappingView(ttk.Frame):
             self.options_field.set_help("Každá varianta na svém řádku; první je výchozí.")
         else:
             self.options_field.set_help("Uplatní se jen u typu „výběr“.")
-        self.default_field.set_enabled(chosen != "choice" or True)
 
     def _show_places(self, spec: FieldSpec | None) -> None:
         text = self.places_text
