@@ -13,6 +13,12 @@ on:
           Actions. Větev je jednorázová a maže se hned po převzetí.
         type: boolean
         default: false
+      cleanup:
+        description: >-
+          Smazat dočasnou větev dlg-build-delivery. Spouští se samostatně,
+          až je sestavení převzaté.
+        type: boolean
+        default: false
   push:
     branches:
       - claude/domain-letter-generator-62qkrm
@@ -305,3 +311,27 @@ jobs:
           git push -f -q origin "$DELIVERY_BRANCH"
           echo "Předáno do větve $DELIVERY_BRANCH:"
           ls -l
+
+  # --------------------------------------------------------------------------
+  cleanup:
+    name: Úklid dočasné větve
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.cleanup }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Smazat dlg-build-delivery
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          git init -q cleanup
+          cd cleanup
+          git remote add origin \
+            "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+          if git ls-remote --exit-code --heads origin dlg-build-delivery >/dev/null 2>&1; then
+            git push -q origin --delete dlg-build-delivery
+            echo "Větev dlg-build-delivery smazána."
+          else
+            echo "Větev dlg-build-delivery neexistuje, není co uklízet."
+          fi
