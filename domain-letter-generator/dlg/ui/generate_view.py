@@ -233,6 +233,8 @@ class GenerateView(ttk.Frame):
         self._baseline: tuple[dict[str, str], dict[str, bool]] = ({}, {})
         self._busy = False
         self._loading = False
+        #: Šablona, ze které právě běží generování (kvůli pozdním callbackům).
+        self._generating_template_id = ""
 
         self.columnconfigure(0, weight=1)
         self.rowconfigure(1, weight=1)
@@ -1181,6 +1183,7 @@ class GenerateView(ttk.Frame):
 
         # Sestavení dopisu je u delší šablony práce na stovky ms — do vlákna
         # patří celé, ne až samotný zápis souboru.
+        self._generating_template_id = self.template_id
         self._set_busy(True)
         self.status.busy("Generuji dopis…")
         widgets.run_in_thread(
@@ -1206,11 +1209,23 @@ class GenerateView(ttk.Frame):
         self.status.idle()
         self.last_output_path = Path(path)
         self.last_report = report
-        # hodnoty byly použité — zavření aplikace se na ně už ptát nemusí
-        self._baseline = (
-            self.values(),
-            {pid: bool(var.get()) for pid, var in self._paragraph_vars},
+
+        # Formulář mohl mezitím přejít na jinou šablonu — generování běží ve
+        # vlákně a se zapnutým PDF trvá i desítky sekund (Word se startuje
+        # pomalu). Kdyby se do baseline zapsal AKTUÁLNÍ obsah formuláře, začal
+        # by se rozepsaný dopis jiné šablony tvářit jako uložený a aplikace by
+        # se při zavírání na neuložené změny nezeptala.
+        stejna_sablona = (
+            not self._generating_template_id
+            or self._generating_template_id == self.template_id
         )
+        if stejna_sablona:
+            # hodnoty byly použité — zavření aplikace se na ně už ptát nemusí
+            self._baseline = (
+                dict(values),
+                {pid: bool(var.get()) for pid, var in self._paragraph_vars},
+            )
+        self._generating_template_id = ""
 
         if self.history is not None:
             try:

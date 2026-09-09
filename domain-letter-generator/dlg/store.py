@@ -375,6 +375,13 @@ class TemplateStore:
             except StoreError:
                 # poškozenou šablonu jen přeskočíme, aplikace musí jet dál
                 continue
+            # O identitě šablony rozhoduje NÁZEV SLOŽKY, ne obsah meta.json.
+            # Kdo si v Průzkumníku zkopíruje složku šablony jako zálohu (což
+            # tlačítko „Otevřít složku“ přímo nabízí), má rázem dvě šablony se
+            # stejným id v meta.json — a pohled Šablony, který z id skládá
+            # klíče řádků tabulky, na druhém řádku spadne. Složka je navíc to,
+            # co se čte, zapisuje i maže, takže je autoritou tak jako tak.
+            meta.id = entry.name
             self._remember_problems(meta.id, problems)
             items.append(meta)
 
@@ -391,6 +398,8 @@ class TemplateStore:
             raise TemplateNotFound(f"Šablona „{template_id}“ nebyla nalezena.")
         problems: list[str] = []
         meta = _meta_from_data(data, self._validate_id(template_id), problems)
+        # Stejně jako v list(): autoritou je složka, ze které se právě četlo.
+        meta.id = self._validate_id(template_id)
         self._remember_problems(meta.id, problems)
         return meta
 

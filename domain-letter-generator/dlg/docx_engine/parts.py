@@ -12,6 +12,7 @@ import io
 import os
 import re
 import zipfile
+import zlib
 from pathlib import Path
 from typing import Iterator, Mapping, Sequence
 
@@ -29,6 +30,28 @@ class DocxError(Exception):
 
 
 MAIN_PART = "word/document.xml"
+
+#: Strop na velikost rozbaleného balíčku. Skutečné šablony mají jednotky MB;
+#: tenhle limit je proti „zip bombě“ — pár set kilobajtů v archivu se umí
+#: rozbalit na gigabajty a aplikace se načítáním do paměti zadusí.
+MAX_UNPACKED_BYTES = 300 * 1024 * 1024
+
+
+def _check_unpacked_size(entries: "Sequence[zipfile.ZipInfo]") -> None:
+    """Ověří, že se balíček po rozbalení vejde do rozumné paměti."""
+
+    celkem = 0
+    for info in entries:
+        try:
+            celkem += max(0, int(info.file_size))
+        except (TypeError, ValueError):  # pragma: no cover - divná položka zipu
+            continue
+        if celkem > MAX_UNPACKED_BYTES:
+            raise DocxError(
+                "Soubor .docx je po rozbalení nepřiměřeně velký "
+                f"(přes {MAX_UNPACKED_BYTES // (1024 * 1024)} MB) — "
+                "aplikace ho odmítla otevřít."
+            )
 
 _HEADER_RE = re.compile(r"^word/header\d*\.xml$")
 _FOOTER_RE = re.compile(r"^word/footer\d*\.xml$")
@@ -103,13 +126,35 @@ class DocxPackage:
         try:
             with zipfile.ZipFile(io.BytesIO(raw)) as archive:
                 entries = list(archive.infolist())
+                _check_unpacked_size(entries)
                 contents: dict[str, bytes] = {}
                 for info in entries:
                     contents[info.filename] = b"" if info.is_dir() else archive.read(info)
                 comment = archive.comment
+        except DocxError:
+            raise
         except zipfile.BadZipFile as exc:
             raise DocxError(
                 "Soubor není platný .docx — nejde ho otevřít jako ZIP archiv."
+            ) from exc
+        except NotImplementedError as exc:
+            # zip s nepodporovanou kompresí (typicky Deflate64 z některých
+            # archivačních nástrojů)
+            raise DocxError(
+                "Soubor .docx používá kompresi, kterou aplikace neumí rozbalit. "
+                "Otevřete ho ve Wordu a uložte znovu příkazem „Uložit jako“."
+            ) from exc
+        except RuntimeError as exc:
+            # zipfile hlásí zaheslovaný archiv právě takhle
+            raise DocxError(
+                "Soubor .docx je zaheslovaný. Odstraňte heslo a zkuste to znovu."
+            ) from exc
+        except (zlib.error, EOFError, ValueError, OSError) as exc:
+            # poškozený komprimovaný proud (typicky nedokončený přenos ze
+            # síťového disku nebo z OneDrive)
+            raise DocxError(
+                "Soubor .docx je poškozený — nepodařilo se rozbalit jeho obsah. "
+                f"({exc})"
             ) from exc
         if MAIN_PART not in contents:
             raise DocxError(

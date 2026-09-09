@@ -175,6 +175,78 @@ def _generate_view(root: tk.Tk, store: TemplateStore, history: ValueHistory,
     return view
 
 
+def _druha_sablona(store: TemplateStore, tmp_path: Path) -> str:
+    """Druhá, jiná šablona v knihovně — pro testy přepnutí za běhu."""
+
+    docx = pytest.importorskip("docx", reason="python-docx je vývojová závislost")
+    document = docx.Document()
+    document.add_paragraph("Dobrý den [Adresát druhé šablony],")
+    cesta = tmp_path / "druha.docx"
+    document.save(str(cesta))
+    return store.import_docx(cesta, "Druhá šablona").id
+
+
+def test_pozdni_dokonceni_nesahne_na_jinou_sablonu(
+    root: tk.Tk, store: TemplateStore, history: ValueHistory,
+    settings: config.Settings, template_id: str, tmp_path: Path,
+) -> None:
+    """Regrese: dokončení generování šablony A nesmí „uložit“ rozepsanou B.
+
+    Generování běží ve vlákně a se zapnutou volbou PDF trvá i desítky sekund
+    (Word se startuje pomalu). Uživatel mezitím stihne přepnout na jinou
+    šablonu a rozepsat další dopis. Callback zapisoval do baseline AKTUÁLNÍ
+    obsah formuláře, takže se rozepsaná šablona B začala tvářit jako uložená
+    a aplikace se při zavírání na neuložené změny nezeptala — dopis se ztratil.
+    """
+
+    view = _generate_view(root, store, history, settings)
+    assert view.load(template_id)
+    hodnoty_a = _fill_everything(view)
+    root.update()
+
+    # uživatel přepne na druhou šablonu a rozepíše ji
+    druha = _druha_sablona(store, tmp_path)
+    view.refresh_templates()
+    assert view.load(druha)
+    root.update()
+    view.set_values({spec.key: "ROZEPSANÝ DOPIS" for spec in view.meta.ordered_fields()})
+    root.update()
+    assert view.has_unsaved_input(), "předpoklad testu: druhá šablona je rozepsaná"
+
+    # a teprve teď dorazí pozdní callback z generování PRVNÍ šablony
+    vystup = tmp_path / "prvni-dopis.docx"
+    vystup.write_bytes(b"PK\x03\x04")
+    view._generating_template_id = template_id
+    view._finish(vystup, gv.FillReport(), hodnoty_a, False)
+    root.update()
+
+    assert view.has_unsaved_input(), (
+        "pozdní dokončení jiné šablony označilo rozepsaný dopis za uložený"
+    )
+
+
+def test_dokonceni_vlastni_sablony_baseline_srovna(
+    root: tk.Tk, store: TemplateStore, history: ValueHistory,
+    settings: config.Settings, template_id: str, tmp_path: Path,
+) -> None:
+    """Když se formulář nepřepnul, je po vygenerování „bez neuložených změn“."""
+
+    view = _generate_view(root, store, history, settings)
+    assert view.load(template_id)
+    hodnoty = _fill_everything(view)
+    root.update()
+    assert view.has_unsaved_input()
+
+    vystup = tmp_path / "dopis.docx"
+    vystup.write_bytes(b"PK\x03\x04")
+    view._generating_template_id = template_id
+    view._finish(vystup, gv.FillReport(), hodnoty, False)
+    root.update()
+
+    assert not view.has_unsaved_input()
+    assert view.last_output_path == vystup
+
+
 def _mapping_view(root: tk.Tk, store: TemplateStore, on_done: Any = None) -> mv.MappingView:
     view = mv.MappingView(root, store, on_done, None)
     view.pack(fill="both", expand=True)
