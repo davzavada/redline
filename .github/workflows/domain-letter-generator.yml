@@ -92,6 +92,22 @@ jobs:
             python -m pytest -q
           fi
 
+      - name: Úklid před předáním zdrojáku
+        run: |
+          find . -name '__pycache__' -type d -prune -exec rm -rf {} +
+          rm -rf .pytest_cache
+
+      # Zdroják pro Windows job. Ten se nemůže klonovat sám — viz komentář
+      # u jobu `build`.
+      - name: Zdrojový kód pro Windows build
+        uses: actions/upload-artifact@v4
+        with:
+          name: dlg-source
+          path: domain-letter-generator
+          include-hidden-files: true
+          retention-days: 1
+          if-no-files-found: error
+
   # --------------------------------------------------------------------------
   build:
     name: Windows .exe
@@ -101,15 +117,18 @@ jobs:
       run:
         working-directory: domain-letter-generator
     steps:
-      # Pozor: v repozitáři leží soubory, jejichž názvy obsahují dvojtečku
-      # (migrated_prompt_history/prompt_…T09:40:38.228Z.json). Windows takový
-      # název neumí vytvořit a celý checkout na něm spadne. Bereme proto jen
-      # podsložku s aplikací — na build stejně nic jiného nepotřebujeme.
-      - name: Checkout
-        uses: actions/checkout@v4
+      # Tenhle job se ZÁMĚRNĚ neklonuje. V repozitáři leží soubor
+      # migrated_prompt_history/prompt_…T09:40:38.228Z.json a dvojtečka je ve
+      # Windows v názvu souboru nepovolená. Git na Windows kontroluje všechny
+      # cesty v indexu, takže `git checkout` skončí chybou
+      #   error: invalid path '…'
+      # bez ohledu na sparse-checkout — vybalit jen část repozitáře nestačí.
+      # Zdroják si proto převezmeme jako artefakt z linuxového jobu `test`.
+      - name: Zdrojový kód (artefakt z jobu Testy)
+        uses: actions/download-artifact@v4
         with:
-          sparse-checkout: domain-letter-generator
-          sparse-checkout-cone-mode: true
+          name: dlg-source
+          path: domain-letter-generator
 
       - name: Python ${{ env.PYTHON_VERSION }}
         uses: actions/setup-python@v5
