@@ -490,6 +490,8 @@ class App(tk.Tk):
         self._current: str = ""
         self._template_id: str = str(getattr(self._settings, "last_template_id", "") or "")
         self._fields_need_reload = False
+        #: Pole šablony se změnila — formulář v Generovat je zastaralý.
+        self._generate_needs_reload = False
         self._error_visible = False
         self._normal_geometry = ""
         self._closing = False
@@ -497,6 +499,7 @@ class App(tk.Tk):
         self.title(f"{APP_NAME} {__version__}")
         theme.apply_theme(self)
         widgets.neutralize_control_wheel(self)
+        widgets.free_app_shortcuts(self)
         apply_icon(self)
         self.minsize(*theme.WINDOW_MIN_SIZE)
         self._restore_window_state()
@@ -837,6 +840,16 @@ class App(tk.Tk):
                     # i tudy se dá přijít o rozepsaný formulář
                     if view.confirm_discard("Přepnutím na jinou šablonu o ně přijdete."):
                         view.load(template_id)
+                        self._generate_needs_reload = False
+                elif self._generate_needs_reload and view.template_id:
+                    # Uživatel se vrací z „Pole šablony“. Formulář je postavený
+                    # z původní definice, takže by dál ukazoval staré popisky,
+                    # typy i pořadí — a vyplněné hodnoty by nešly do nových polí.
+                    if not view.has_unsaved_input() or view.confirm_discard(
+                        "Pole šablony se změnila, formulář se musí sestavit znovu."
+                    ):
+                        view.load(view.template_id)
+                    self._generate_needs_reload = False
                 elif not view.template_id:
                     view.load()
                 # výstupní složka se mohla mezitím změnit v Nastavení
@@ -883,6 +896,9 @@ class App(tk.Tk):
         """Odchod z pohledu „Pole šablony“ — zpátky na seznam šablon."""
 
         self._fields_need_reload = True
+        # Pohled Generovat staví formulář z definice polí — po jejich úpravě
+        # musí přestavět, jinak by uživatel dál viděl staré popisky a typy.
+        self._generate_needs_reload = True
         template_id = self.current_template_id()
         self.show_view(NAV_TEMPLATES, template_id=template_id, confirm=False)
         if saved:

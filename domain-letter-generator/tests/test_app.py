@@ -169,6 +169,43 @@ def test_okno_nastartuje_a_ma_cesky_titulek(app: app_module.App) -> None:
     assert app.minsize() == tuple(theme.WINDOW_MIN_SIZE)
 
 
+def test_upravena_pole_se_promitnou_do_generovat(
+    app_se_sablonou: app_module.App, store_se_sablonou: TemplateStore
+) -> None:
+    """Regrese: úprava v „Pole šablony“ se do formuláře v Generovat nedostala.
+
+    Pohled Generovat staví formulář z definice polí. Příznak „pole se změnila“
+    se ale testoval jen ve větvi pro „Pole šablony“, takže se uživatel vrátil
+    na Generovat a viděl dál staré popisky a typy — s tím, že přejmenované
+    pole vůbec nešlo vyplnit.
+    """
+
+    app = app_se_sablonou
+    meta = store_se_sablonou.list()[0]
+    app.show_view(app_module.NAV_GENERATE, template_id=meta.id)
+    app.update()
+
+    pohled = app.view(app_module.NAV_GENERATE)
+    puvodni = [spec.label for spec in pohled._specs]
+    assert puvodni, "předpoklad testu: formulář má pole"
+
+    # uživatel v „Pole šablony“ přejmenuje první pole a uloží
+    upravena = store_se_sablonou.get(meta.id)
+    upravena.fields[0].label = "Držitel domény"
+    store_se_sablonou.save_meta(upravena)
+    app._on_fields_done(saved=True)
+    app.update()
+
+    app.show_view(app_module.NAV_GENERATE)
+    app.update()
+
+    pohled = app.view(app_module.NAV_GENERATE)
+    popisky = [spec.label for spec in pohled._specs]
+    assert "Držitel domény" in popisky, (
+        f"formulář zůstal u staré definice polí: {popisky}"
+    )
+
+
 def test_zkratky_neplati_v_modalnim_dialogu(app: app_module.App) -> None:
     """Regrese: Ctrl+Q stisknuté v modálním dialogu zavřelo celou aplikaci.
 

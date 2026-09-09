@@ -729,7 +729,10 @@ def test_generate_view_povinna_pole_se_oznaci_cervene(
     for klic in prazdne:
         assert view._fields[klic].has_error, f"pole {klic} nemá červenou hlášku"
     assert bez_dialogu["error"]
-    assert "Formulář není vyplněný" in bez_dialogu["error"][0]
+    # hláška nemluví o „nevyplněném formuláři“: mezi problémy je i vyplněné
+    # pole se špatným datem, takže by to uživatele posílalo hledat prázdná místa
+    assert "Formulář zatím není v pořádku" in bez_dialogu["error"][0]
+    assert "2 pole potřebují opravit" in bez_dialogu["error"][0]
     assert not list(Path(settings.output_dir).glob("*.docx")) if Path(
         settings.output_dir
     ).exists() else True

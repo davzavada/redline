@@ -1072,6 +1072,15 @@ class GenerateView(ttk.Frame):
         self._busy = bool(busy)
         for key in ("generovat", "generovat_otevrit", "slozka"):
             self.toolbar.set_enabled(key, not self._busy)
+        # Výběr šablony patří k témuž: generování běží ve vlákně (s PDF i
+        # desítky sekund) a přepnutí šablony mezitím vymění meta i formulář,
+        # takže by se hotový dopis popsal podle úplně jiné šablony.
+        combo = getattr(self, "template_combo", None)
+        if combo is not None:
+            try:
+                combo.state(["disabled"] if self._busy else ["!disabled"])
+            except tk.TclError:  # pragma: no cover - okno se zavírá
+                pass
 
     def generate(self, open_after: bool | None = None) -> bool:
         """Vyplní šablonu a uloží dopis. Vrací ``True``, když se práce rozběhla."""
@@ -1089,10 +1098,10 @@ class GenerateView(ttk.Frame):
                 summary += f"\n• … a další ({len(problems) - 8})"
             widgets.show_error(
                 self,
-                f"Formulář není vyplněný — chybí {widgets.plural_places(len(problems))}.",
+                f"Formulář zatím není v pořádku — {widgets.plural_problems(len(problems))}.",
                 detail=summary,
             )
-            self.status.error(f"Vyplňte povinná pole ({len(problems)}).")
+            self.status.error(f"Zkontrolujte formulář — {widgets.plural_problems(len(problems))}.")
             return False
 
         try:
@@ -1132,7 +1141,7 @@ class GenerateView(ttk.Frame):
                 question.append(f"Konkrétně: {listed}")
             if question:
                 headline = (
-                    f"V dokumentu zůstane {widgets.plural_places(len(remaining))} nevyplněných."
+                    f"V dokumentu {widgets.plural_unfilled(len(remaining))}."
                     if remaining
                     else "Šablona se od posledního mapování změnila."
                 )
@@ -1249,7 +1258,7 @@ class GenerateView(ttk.Frame):
             if len(remaining) > MAX_LISTED_UNFILLED:
                 listed += f" a další ({len(remaining) - MAX_LISTED_UNFILLED})"
             notes.append(
-                f"V dokumentu zůstalo {widgets.plural_places(len(remaining))} nevyplněných: {listed}"
+                f"V dokumentu {widgets.plural_unfilled_past(len(remaining))}: {listed}"
             )
         if notes:
             widgets.show_warning(

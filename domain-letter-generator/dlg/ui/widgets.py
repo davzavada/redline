@@ -60,9 +60,13 @@ __all__ = [
     "center_on",
     "event_int",
     "format_date",
+    "free_app_shortcuts",
     "neutralize_control_wheel",
     "parse_date",
     "plural_places",
+    "plural_problems",
+    "plural_unfilled",
+    "plural_unfilled_past",
     "run_in_thread",
     "show_error",
     "show_info",
@@ -337,6 +341,30 @@ def neutralize_control_wheel(widget: tk.Misc) -> None:
                 widget.bind_class(name, sequence, lambda _event: "break")
             except tk.TclError:  # pragma: no cover - ořezaný Tk
                 continue
+
+
+#: Vestavěné vazby Tk, které si berou klávesu potřebnou pro zkratku aplikace.
+#: Zatím jediná: ``Text`` má na ``<Control-o>`` vložení nového řádku.
+_COLLIDING_CLASS_KEYS: tuple[tuple[str, str], ...] = (("Text", "<Control-o>"),)
+
+
+def free_app_shortcuts(widget: tk.Misc) -> None:
+    """Uvolní klávesy, které si Tk bere dřív, než se dostanou k aplikaci.
+
+    Vazby na třídu widgetu běží dřív než vazba okna. ``tk.Text`` má vestavěné
+    ``<Control-o>``, které vloží nový řádek — takže Ctrl+O ve víceřádkovém poli
+    formuláře rozsekne rozepsanou adresu a teprve pak otevře výběr šablony.
+
+    Vazba se **nahradí** obsluhou, která nic nedělá a nevrací ``"break"``:
+    znak se nevloží a událost pokračuje dál na okno, kde ji převezme zkratka
+    aplikace.
+    """
+
+    for jmeno, sekvence in _COLLIDING_CLASS_KEYS:
+        try:
+            widget.bind_class(jmeno, sekvence, lambda _event: None)
+        except tk.TclError:  # pragma: no cover - ořezaný Tk
+            continue
 
 
 def _register_wheel(frame: "ScrollableFrame") -> None:
@@ -632,6 +660,46 @@ def plural_places(count: int) -> str:
     if 2 <= count <= 4:
         return f"{count} místa"
     return f"{count} míst"
+
+
+def plural_problems(count: int) -> str:
+    """„1 pole potřebuje opravit“ / „3 pole potřebují“ / „7 polí potřebuje“.
+
+    Hláška dřív tvrdila, že „formulář není vyplněný“, i když šlo o vyplněné
+    pole se špatným datem (32.13.2026) — což uživatele posílalo hledat prázdná
+    políčka, kterých se to netýkalo.
+    """
+
+    if count == 1:
+        return "1 pole potřebuje opravit"
+    if 2 <= count <= 4:
+        return f"{count} pole potřebují opravit"
+    return f"{count} polí potřebuje opravit"
+
+
+def plural_unfilled(count: int) -> str:
+    """Celá věta o nevyplněných místech, aby seděla česká shoda.
+
+    Skládat ji z :func:`plural_places` nešlo: sloveso ani přívlastek se
+    s číslovkou neshodnou v žádném tvaru současně, takže z toho lezlo
+    „zůstane 3 místa nevyplněných“ nebo „zůstalo 1 místo nevyplněných“.
+    """
+
+    if count == 1:
+        return "zůstane 1 nevyplněné místo"
+    if 2 <= count <= 4:
+        return f"zůstanou {count} nevyplněná místa"
+    return f"zůstane {count} nevyplněných míst"
+
+
+def plural_unfilled_past(count: int) -> str:
+    """Totéž v minulém čase — pro hlášku po uložení dopisu."""
+
+    if count == 1:
+        return "zůstalo 1 nevyplněné místo"
+    if 2 <= count <= 4:
+        return f"zůstala {count} nevyplněná místa"
+    return f"zůstalo {count} nevyplněných míst"
 
 
 def _fold(text: str) -> str:

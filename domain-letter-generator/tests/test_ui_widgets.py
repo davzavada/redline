@@ -321,6 +321,44 @@ def test_scrollable_frame_roluje_koleckem(root: tk.Tk) -> None:
     assert W._dispatch_wheel(root, mimo) is None
 
 
+def test_ctrl_o_nevklada_novy_radek(root: tk.Tk) -> None:
+    """Regrese: Ctrl+O rozseklo rozepsaný text ve víceřádkovém poli.
+
+    ``tk.Text`` má vestavěnou vazbu ``<Control-o>``, která vloží nový řádek, a
+    vazby na třídu běží dřív než vazba okna. Uživatel chtěl nahrát šablonu,
+    zmáčkl Ctrl+O v poli s adresou a dostal navíc prázdný řádek doprostřed.
+    """
+
+    W.free_app_shortcuts(root)
+    text = tk.Text(root, height=3)
+    text.pack()
+    text.insert("1.0", "Jan Novák, Dlouhá 5, Praha")
+    text.mark_set("insert", "1.10")
+    text.focus_set()
+    root.update()
+
+    pred = text.get("1.0", "end-1c")
+    text.event_generate("<Control-o>")
+    root.update()
+    assert text.get("1.0", "end-1c") == pred, "Ctrl+O vložilo do textu nový řádek"
+
+
+def test_ceska_shoda_v_hlaskach_o_nevyplnenych() -> None:
+    """Věty se skládaly z číslovky a pevného zbytku, takže se nikdy neshodly."""
+
+    assert W.plural_unfilled(1) == "zůstane 1 nevyplněné místo"
+    assert W.plural_unfilled(3) == "zůstanou 3 nevyplněná místa"
+    assert W.plural_unfilled(7) == "zůstane 7 nevyplněných míst"
+
+    assert W.plural_unfilled_past(1) == "zůstalo 1 nevyplněné místo"
+    assert W.plural_unfilled_past(2) == "zůstala 2 nevyplněná místa"
+    assert W.plural_unfilled_past(9) == "zůstalo 9 nevyplněných míst"
+
+    assert W.plural_problems(1) == "1 pole potřebuje opravit"
+    assert W.plural_problems(4) == "4 pole potřebují opravit"
+    assert W.plural_problems(5) == "5 polí potřebuje opravit"
+
+
 def test_kolecko_nad_comboboxem_nemeni_hodnotu(root: tk.Tk) -> None:
     """Regrese: rolování formuláře si tiše přepisovalo hodnoty v polích.
 
