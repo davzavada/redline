@@ -315,6 +315,23 @@ def _base_metrics(root: tk.Misc | None) -> tuple[str, int, bool]:
     return (family, abs(size), size < 0)
 
 
+#: Atribut na kořenovém okně, kde si držíme odkazy na vytvořená písma.
+_FONTS_ATTR = "_dlg_named_fonts"
+
+
+def _font_registry(root: tk.Misc) -> dict[str, tkfont.Font]:
+    """Odkazy na vytvořená písma musí přežít — ``tkfont.Font.__del__`` je maže."""
+
+    registry = getattr(root, _FONTS_ATTR, None)
+    if not isinstance(registry, dict):
+        registry = {}
+        try:
+            setattr(root, _FONTS_ATTR, registry)
+        except Exception:  # pragma: no cover - widget bez __dict__
+            pass
+    return registry
+
+
 def _derive_font(root: tk.Misc, name: str, *, delta: int = 0, weight: str = "normal") -> str:
     """Vytvoří (nebo přenastaví) pojmenované písmo odvozené od základního."""
 
@@ -327,12 +344,16 @@ def _derive_font(root: tk.Misc, name: str, *, delta: int = 0, weight: str = "nor
     if family:
         options["family"] = family
 
+    registry = _font_registry(root)
     try:
         if name in _existing_font_names(root):
-            font = tkfont.Font(root=root, name=name, exists=True)
+            font = registry.get(name)
+            if font is None:
+                font = tkfont.Font(root=root, name=name, exists=True)
             font.configure(**options)  # type: ignore[arg-type]
         else:
-            tkfont.Font(root=root, name=name, exists=False, **options)  # type: ignore[arg-type]
+            font = tkfont.Font(root=root, name=name, exists=False, **options)  # type: ignore[arg-type]
+        registry[name] = font
     except Exception:
         return FONT_BASE
     return name
