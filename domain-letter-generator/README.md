@@ -215,15 +215,52 @@ python -m PyInstaller --noconfirm --workpath build\onefile --distpath dist Domai
 
 ### Přesun do vlastního repozitáře
 
-Složka `domain-letter-generator/` je soběstačná — kód nikam ven nesahá, jediná
-runtime závislost je standardní knihovna Pythonu. Při přesunu stačí:
+Složka je soběstačná: kód nikam ven nesahá a jedinou runtime závislostí je
+standardní knihovna Pythonu. Workflow pro samostatný repozitář už je připravené
+v `.github/workflows/build.yml` — dokud aplikace leží v podsložce, je nečinné
+(GitHub Actions čte jen `.github/` v kořeni repozitáře), po osamostatnění se
+ale ocitne přesně tam, kde má být.
 
-1. Vzít celou složku jako nový kořen repozitáře.
-2. Přenést i `.github/workflows/domain-letter-generator.yml` (leží o patro výš).
-3. Ve workflow zrušit `defaults.run.working-directory: domain-letter-generator`,
-   filtr `paths:` a předávání zdrojáku artefaktem mezi joby `test` a `build` —
-   to obchází soubor s dvojtečkou v názvu, který je jen v tomhle repozitáři,
-   a v samostatném repozitáři se Windows job může normálně naklonovat.
+**S historií** (doporučeno — historie složky zůstane zachovaná):
+
+```
+# 1) v repozitáři redline vyrobte větev jen z této podsložky
+git subtree split --prefix=domain-letter-generator -b dlg-split
+
+# 2) pošlete ji do nového (prázdného) repozitáře jako main
+git remote add dlg git@github.com:<vlastnik>/<novy-repozitar>.git
+git push dlg dlg-split:main
+
+# 3) hotovo — a lokálně si to naklonujte načisto
+git clone git@github.com:<vlastnik>/<novy-repozitar>.git
+```
+
+`git subtree split` přepíše cesty tak, že `domain-letter-generator/dlg/app.py`
+je v novém repozitáři `dlg/app.py`. Commity, které se složky netýkaly, do
+historie nejdou.
+
+**Bez historie**, když na ní nezáleží:
+
+```
+cp -r domain-letter-generator /cesta/k/novemu-repozitari
+cd /cesta/k/novemu-repozitari
+git init -b main && git add -A && git commit -m "Generátor dopisů"
+```
+
+**Co po přesunu ještě udělat**
+
+* Smazat `.github/workflows/domain-letter-generator.yml` v repozitáři redline —
+  v novém repozitáři ho nahrazuje `build.yml`.
+* Zkontrolovat, že v novém repozitáři běží Actions (Settings → Actions) a že má
+  job `release` právo zapisovat (`permissions: contents: write` je v souboru,
+  ale organizace to může globálně omezovat).
+* Vydání se pořád dělá tagem `dlg-v0.1.0`.
+
+Windows job se v samostatném repozitáři klonuje normálně. V redline to nešlo:
+leží tam soubor `migrated_prompt_history/prompt_…T09:40:38.228Z.json` a dvojtečka
+je v názvu souboru na Windows nepovolená, takže `git checkout` skončil chybou —
+zdroják se proto musel předávat oklikou jako artefakt z linuxového jobu. Tahle
+obezlička v `build.yml` už není.
 
 ### Ikona
 

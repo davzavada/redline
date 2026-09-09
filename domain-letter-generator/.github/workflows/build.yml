@@ -1,0 +1,229 @@
+# Testy a sestavení Windows aplikace „Generátor dopisů“.
+#
+# POZOR: dokud aplikace leží v podsložce repozitáře redline, je tenhle soubor
+# NEČINNÝ — GitHub Actions čte jen `.github/workflows/` v kořeni repozitáře.
+# Je tu proto, aby po osamostatnění složky (viz README, „Přesun do vlastního
+# repozitáře“) skončil rovnou v kořeni a workflow fungovalo bez úprav.
+# Do té doby platí `.github/workflows/domain-letter-generator.yml` o patro výš.
+name: Generátor dopisů
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+      - 'claude/**'
+    tags:
+      - 'dlg-v*'
+  pull_request:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+concurrency:
+  group: dlg-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  PYTHON_VERSION: '3.12'
+
+jobs:
+  # --------------------------------------------------------------------------
+  test:
+    name: Testy (Linux, Python 3.12)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Python ${{ env.PYTHON_VERSION }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+          cache-dependency-path: requirements-dev.txt
+
+      - name: Vývojové závislosti
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements-dev.txt
+
+      - name: Aplikace nemá runtime závislosti
+        # Kontrakt projektu: balík dlg smí sáhnout jen do standardní knihovny.
+        run: |
+          python - <<'PY'
+          import ast
+          import pathlib
+          import sys
+
+          bad = []
+          for path in sorted(pathlib.Path("dlg").rglob("*.py")):
+              tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+              for node in ast.walk(tree):
+                  if isinstance(node, ast.Import):
+                      names = [alias.name.split(".")[0] for alias in node.names]
+                  elif isinstance(node, ast.ImportFrom):
+                      if node.level:  # relativní import uvnitř balíčku
+                          continue
+                      names = [(node.module or "").split(".")[0]]
+                  else:
+                      continue
+                  for name in names:
+                      if name and name != "dlg" and name not in sys.stdlib_module_names:
+                          bad.append(f"{path}:{node.lineno}: {name}")
+
+          if bad:
+              print("::error::Balík dlg smí používat jen standardní knihovnu Pythonu.")
+              print("\n".join(bad))
+              raise SystemExit(1)
+          print("OK — dlg importuje jen standardní knihovnu.")
+          PY
+
+      - name: Kontrola ikony assets/app.ico
+        run: python tools/make_icon.py --check
+
+      - name: Testy
+        # Okno potřebuje displej; bez xvfb by se GUI testy přeskočily.
+        run: xvfb-run -a python -m pytest -q
+
+  # --------------------------------------------------------------------------
+  build:
+    name: Windows .exe
+    needs: test
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Python ${{ env.PYTHON_VERSION }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+          cache-dependency-path: requirements-dev.txt
+
+      - name: Vývojové závislosti (včetně PyInstalleru)
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements-dev.txt
+
+      - name: Kontrola ikony assets/app.ico
+        run: python tools/make_icon.py --check
+
+      # Pořadí je záměrné: onedir je varianta, kterou má uživatel spouštět.
+      # Onefile při každém startu rozbaluje celý obsah .exe do %TEMP% a čeká
+      # na antivirus — proto startuje o vteřiny pomaleji.
+      - name: Build — složka (onedir, doporučená varianta)
+        env:
+          DLG_BUILD_MODE: onedir
+        run: python -m PyInstaller --noconfirm --clean --workpath build/onedir --distpath dist DomainLetterGenerator.spec
+
+      - name: Build — jeden soubor (onefile, na flashku)
+        env:
+          DLG_BUILD_MODE: onefile
+        run: python -m PyInstaller --noconfirm --workpath build/onefile --distpath dist DomainLetterGenerator.spec
+
+      - name: Kontrola výsledku
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $dir = 'dist/GeneratorDopisu-onedir/GeneratorDopisu.exe'
+          if (-not (Test-Path -LiteralPath $dir)) { throw "Chybi $dir" }
+          $exe = 'dist/GeneratorDopisu.exe'
+          if (-not (Test-Path -LiteralPath $exe)) { throw "Chybi $exe" }
+          $item = Get-Item -LiteralPath $exe
+          Write-Host ("Velikost jednosouborove varianty: {0:N1} MB" -f ($item.Length / 1MB))
+          $info = $item.VersionInfo
+          Write-Host "ProductName : $($info.ProductName)"
+          Write-Host "FileVersion : $($info.FileVersion)"
+          if ([string]::IsNullOrWhiteSpace($info.FileVersion)) {
+            throw "V .exe chybi version resource."
+          }
+
+      - name: Zabalit onedir variantu
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          Compress-Archive -Path 'dist/GeneratorDopisu-onedir' -DestinationPath 'dist/GeneratorDopisu-onedir.zip' -Force
+
+      - name: Artefakt — varianta ve složce (doporučená)
+        uses: actions/upload-artifact@v4
+        with:
+          name: GeneratorDopisu-onedir
+          path: dist/GeneratorDopisu-onedir.zip
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Artefakt — GeneratorDopisu.exe
+        uses: actions/upload-artifact@v4
+        with:
+          name: GeneratorDopisu-exe
+          path: dist/GeneratorDopisu.exe
+          if-no-files-found: error
+          retention-days: 30
+
+  # --------------------------------------------------------------------------
+  release:
+    name: Vydání (GitHub Release)
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/dlg-v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Stáhnout artefakty
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Připravit soubory vydání
+        run: |
+          set -euo pipefail
+          mkdir -p release
+          cp artifacts/GeneratorDopisu-onedir/GeneratorDopisu-onedir.zip release/
+          cp artifacts/GeneratorDopisu-exe/GeneratorDopisu.exe release/
+          ls -l release
+
+      - name: Poznámky k vydání
+        run: |
+          set -euo pipefail
+          version="${GITHUB_REF_NAME#dlg-v}"
+          cat > release/notes.md <<EOF
+          ## Generátor dopisů $version
+
+          **Co stáhnout**
+
+          * \`GeneratorDopisu-onedir.zip\` — **tohle použijte.** Rozbalte celou
+            složku a spouštějte \`GeneratorDopisu.exe\` uvnitř ní. Nic se
+            neinstaluje a nepotřebuje práva správce. Program naskočí hned.
+          * \`GeneratorDopisu.exe\` — celý program v jednom souboru, hodí se na
+            flashku. Startuje ale o dost pomaleji: při každém spuštění se celý
+            rozbalí do dočasné složky a čeká na antivirovou kontrolu. Ze
+            stejného důvodu u něj antivirus častěji hlásí falešný poplach.
+
+          **Kam se ukládají data**
+
+          Šablony a nastavení leží v \`%LOCALAPPDATA%\\DomainLetterGenerator\`.
+          Zálohovat stačí tuto složku.
+
+          **Poznámka k antiviru**
+
+          Aplikace není podepsaná certifikátem, takže ji SmartScreen nebo
+          antivirus může napoprvé označit za neznámou: *Další informace →
+          Přesto spustit*.
+          EOF
+          cat release/notes.md
+
+      - name: Vytvořit release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh release create "$GITHUB_REF_NAME" \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "Generátor dopisů ${GITHUB_REF_NAME#dlg-v}" \
+            --notes-file release/notes.md \
+            release/GeneratorDopisu-onedir.zip \
+            release/GeneratorDopisu.exe
