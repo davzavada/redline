@@ -5,6 +5,14 @@ name: Generátor dopisů
 
 on:
   workflow_dispatch:
+    inputs:
+      deliver:
+        description: >-
+          Pushnout hotové .exe do dočasné větve dlg-build-delivery.
+          Slouží k převzetí sestavení tam, kde nejsou dostupné artefakty
+          Actions. Větev je jednorázová a maže se hned po převzetí.
+        type: boolean
+        default: false
   push:
     branches:
       - claude/domain-letter-generator-62qkrm
@@ -259,3 +267,41 @@ jobs:
             --notes-file release/notes.md \
             release/GeneratorDopisu.exe \
             release/GeneratorDopisu-onedir.zip
+
+  # --------------------------------------------------------------------------
+  deliver:
+    name: Předání .exe do dočasné větve
+    needs: build
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.deliver }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      DELIVERY_BRANCH: dlg-build-delivery
+    steps:
+      - name: Stáhnout artefakty
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      # Osiřelý commit v samostatném repozitáři — do historie redline se
+      # binárka nedostane. Větev se po převzetí souboru smaže.
+      - name: Push do dočasné větve
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          mkdir -p delivery
+          cp artifacts/GeneratorDopisu-exe/GeneratorDopisu.exe delivery/
+          cp artifacts/GeneratorDopisu-onedir/GeneratorDopisu-onedir.zip delivery/
+          cd delivery
+          git init -q -b "$DELIVERY_BRANCH"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git commit -q -m "Dočasné předání sestavení (běh ${{ github.run_id }})"
+          git remote add origin \
+            "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+          git push -f -q origin "$DELIVERY_BRANCH"
+          echo "Předáno do větve $DELIVERY_BRANCH:"
+          ls -l
