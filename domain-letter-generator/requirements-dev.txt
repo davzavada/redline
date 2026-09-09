@@ -1,0 +1,14 @@
+# Vývojové a build závislosti — NIC z toho aplikace za běhu nepotřebuje.
+#
+# Samotný „Generátor dopisů“ běží na čisté standardní knihovně Pythonu
+# (zipfile, xml, tkinter, json, pathlib, …). Runtime závislostí je nula
+# a soubor requirements.txt proto v projektu vůbec neexistuje.
+#
+# Instalace:  python -m pip install -r requirements-dev.txt
+
+# --- testy -------------------------------------------------------------------
+pytest>=8.0,<10          # spouštění testů (pytest.ini)
+python-docx>=1.1.0,<2    # jen v tests/fixtures.py: skládání testovacích .docx
+
+# --- build Windows .exe ------------------------------------------------------
+pyinstaller>=6.10,<8     # spouští se jen na Windows, viz build.bat a CI
