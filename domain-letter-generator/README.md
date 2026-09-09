@@ -213,6 +213,18 @@ set DLG_BUILD_MODE=onefile
 python -m PyInstaller --noconfirm --workpath build\onefile --distpath dist DomainLetterGenerator.spec
 ```
 
+### Přesun do vlastního repozitáře
+
+Složka `domain-letter-generator/` je soběstačná — kód nikam ven nesahá, jediná
+runtime závislost je standardní knihovna Pythonu. Při přesunu stačí:
+
+1. Vzít celou složku jako nový kořen repozitáře.
+2. Přenést i `.github/workflows/domain-letter-generator.yml` (leží o patro výš).
+3. Ve workflow zrušit `defaults.run.working-directory: domain-letter-generator`,
+   filtr `paths:` a předávání zdrojáku artefaktem mezi joby `test` a `build` —
+   to obchází soubor s dvojtečkou v názvu, který je jen v tomhle repozitáři,
+   a v samostatném repozitáři se Windows job může normálně naklonovat.
+
 ### Ikona
 
 `assets/app.ico` se generuje skriptem, ne ručně:
