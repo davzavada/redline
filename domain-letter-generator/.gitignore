@@ -1,0 +1,11 @@
+# lokální ukázkové šablony (klientské dokumenty se necommitují)
+samples_local/
+build/
+dist/
+*.spec.bak
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+.dlg_home/
