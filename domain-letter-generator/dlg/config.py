@@ -24,9 +24,7 @@ from __future__ import annotations
 import errno
 import json
 import os
-import shutil
 import sys
-import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Mapping, Sequence
@@ -322,6 +320,7 @@ def data_home_status() -> DataHomeStatus:
 
 def _check_writable(path: Path) -> None:
     """Ověří, že do složky opravdu půjde zapisovat."""
+    import tempfile
 
     ensure_dir(path)
     probe: str | None = None
@@ -370,6 +369,7 @@ def set_app_home(target: Path | str | None, *, move_existing: bool = False) -> P
     současné složky do nové. Stěhování se odmítne, pokud v cílové složce
     už nějaká data jsou — přepsat cizí šablony by byla nevratná ztráta.
     """
+    import shutil
 
     status = data_home_status()
     if not status.can_change:
@@ -401,6 +401,7 @@ def set_app_home(target: Path | str | None, *, move_existing: bool = False) -> P
 
     def rollback() -> list[str]:
         """Vrátí přesunuté položky zpět; vrací názvy těch, které se vrátit nedaly."""
+        import shutil
 
         stuck: list[str] = []
         for src_entry, dst_entry in reversed(moved):
@@ -535,6 +536,7 @@ def write_json_atomic(path: Path, data: Any) -> None:
     UTF-8, ``ensure_ascii=False``, ``indent=2``. Buď se povede celý zápis,
     nebo na disku zůstane původní verze souboru.
     """
+    import tempfile
 
     path = Path(path)
     ensure_dir(path.parent)
@@ -611,6 +613,8 @@ class Settings:
 
     output_dir: str = ""
     open_after_generate: bool = True
+    #: Uložit vedle dopisu i PDF (viz :mod:`dlg.pdf`).
+    export_pdf: bool = False
     clear_highlight: bool = True
     keep_unfilled: bool = True
     last_template_id: str = ""
@@ -626,6 +630,7 @@ class Settings:
         return {
             "output_dir": self.output_dir,
             "open_after_generate": self.open_after_generate,
+            "export_pdf": self.export_pdf,
             "clear_highlight": self.clear_highlight,
             "keep_unfilled": self.keep_unfilled,
             "last_template_id": self.last_template_id,
@@ -645,6 +650,7 @@ class Settings:
         return cls(
             output_dir=str(data.get("output_dir") or ""),
             open_after_generate=bool(data.get("open_after_generate", True)),
+            export_pdf=bool(data.get("export_pdf", False)),
             clear_highlight=bool(data.get("clear_highlight", True)),
             keep_unfilled=bool(data.get("keep_unfilled", True)),
             last_template_id=str(data.get("last_template_id") or ""),

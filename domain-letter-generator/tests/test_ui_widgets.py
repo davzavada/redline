@@ -131,6 +131,52 @@ def test_apply_theme_je_idempotentni(root: tk.Tk) -> None:
     assert prvni.lookup("Nadpis.TLabel", "font") == druhy.lookup("Nadpis.TLabel", "font")
 
 
+def test_zadne_tlacitko_si_nebarvi_podklad(root: tk.Tk) -> None:
+    """Regrese: bílé písmo na obarveném podkladu je na Windows nečitelné.
+
+    Nativní motivy Windows (``vista``, ``winnative``) kreslí tlačítko jako
+    obrázek od systému. Volbu ``background`` přitom zahodí, ale ``foreground``
+    respektují — takže styl, který nastaví obojí, dopadne na Linuxu podle
+    očekávání a na Windows jako bílé písmo na světle šedém tlačítku. Přesně tak
+    zmizelo tlačítko „Generovat“.
+
+    Invariant: **žádný styl tlačítka nesmí nastavovat podklad.** Hlavní akce se
+    odliší písmem (viz ``Primary.TButton`` = tučně).
+    """
+
+    style = theme.apply_theme(root)
+    styly_tlacitek = [name for name in theme.STYLE_NAMES if name.endswith("TButton")]
+    assert styly_tlacitek, "seznam stylů tlačítek se vyprázdnil — test by nic nehlídal"
+
+    zakazane = ("background", "lightcolor", "darkcolor", "bordercolor", "focuscolor")
+    for name in styly_tlacitek:
+        # `configure(name)` vrací jen to, co nastavuje styl sám; `lookup` by
+        # dotáhl i hodnoty zděděné z motivu, které aplikace neovlivňuje.
+        vlastni = dict(style.configure(name) or {})
+        prohresky = {k: v for k, v in vlastni.items() if k in zakazane}
+        assert not prohresky, (
+            f"Styl {name} nastavuje {prohresky}. Nativní motiv Windows tyhle volby "
+            f"ignoruje, ale foreground ne — text by se stal nečitelným."
+        )
+
+        # Totéž pro stavové mapy (`style.map`) — i tam se dřív barvil podklad.
+        for volba in zakazane:
+            mapa = style.map(name, query_opt=volba)
+            assert not mapa, f"Styl {name} mapuje {volba}={mapa!r}; podklad patří motivu."
+
+
+def test_hlavni_tlacitko_se_odlisi_pismem(root: tk.Tk) -> None:
+    """Bez barvy musí jít hlavní akci poznat po písmu — jinak nejde poznat vůbec."""
+
+    from tkinter import font as tkfont
+
+    style = theme.apply_theme(root)
+    assert style.lookup("Primary.TButton", "font") == theme.FONT_BOLD
+    assert style.lookup("Nav.Selected.TButton", "font") == theme.FONT_BOLD
+    tucne = tkfont.nametofont(theme.FONT_BOLD, root=root)
+    assert str(tucne.actual("weight")) == "bold"
+
+
 def test_font_name_ma_zaloznu_hodnotu(root: tk.Tk) -> None:
     assert theme.font_name(theme.FONT_HEADING, root) == theme.FONT_HEADING
     assert theme.font_name("TohleNeexistuje", root) == theme.FONT_BASE
@@ -175,17 +221,74 @@ def test_scrollable_frame_sirka_a_scrollregion(root: tk.Tk) -> None:
 @pytest.mark.parametrize(
     ("udalost", "ocekavano"),
     [
-        (SimpleNamespace(num=4, delta=0), -1),   # X11 nahoru
-        (SimpleNamespace(num=5, delta=0), 1),    # X11 dolů
-        (SimpleNamespace(num=0, delta=120), -1),  # Windows nahoru
-        (SimpleNamespace(num=0, delta=-120), 1),  # Windows dolů
-        (SimpleNamespace(num=0, delta=240), -2),  # rychlé otočení
-        (SimpleNamespace(num=0, delta=3), -1),    # macOS
+        # --- X11: kolečko chodí jako tlačítka 4 a 5, `delta` je nepoužité ---
+        (SimpleNamespace(num=4, delta="??"), -1),   # nahoru
+        (SimpleNamespace(num=5, delta="??"), 1),    # dolů
+        # --- Windows: `<MouseWheel>` nese `delta`, `num` je nepoužité ---
+        # POZOR: Tk do nepoužitých polí dosazuje řetězec "??", ne nulu.
+        # Kvůli tomu tady dřív padalo `int(event.num)` na ValueError.
+        (SimpleNamespace(num="??", delta=120), -1),   # nahoru
+        (SimpleNamespace(num="??", delta=-120), 1),   # dolů
+        (SimpleNamespace(num="??", delta=240), -2),   # rychlé otočení nahoru
+        (SimpleNamespace(num="??", delta=-240), 2),   # rychlé otočení dolů
+        (SimpleNamespace(num="??", delta=-40), 1),    # přesný touchpad
+        # Zaokrouhlení musí být symetrické: nedotočené kolečko oběma směry o 1.
+        (SimpleNamespace(num="??", delta=121), -1),
+        (SimpleNamespace(num="??", delta=-121), 1),
+        # --- macOS: malá `delta`, `num` bývá 0 ---
+        (SimpleNamespace(num=0, delta=3), -1),
+        (SimpleNamespace(num=0, delta=-3), 1),
+        # --- nesmysly nesmí shodit obsluhu ---
         (SimpleNamespace(num=0, delta=0), 0),
+        (SimpleNamespace(num="??", delta="??"), 0),
+        (SimpleNamespace(), 0),
+        (SimpleNamespace(num=None, delta=None), 0),
     ],
 )
 def test_wheel_units(udalost, ocekavano) -> None:
     assert W._wheel_units(udalost) == ocekavano
+
+
+def test_event_int_snese_neposlusna_pole() -> None:
+    """Tk vyplňuje i pole, která pro danou událost nedávají smysl — řetězcem „??“."""
+
+    udalost = SimpleNamespace(num="??", delta=-120, y="??", width=None)
+    assert W.event_int(udalost, "num") == 0
+    assert W.event_int(udalost, "delta") == -120
+    assert W.event_int(udalost, "y") == 0
+    assert W.event_int(udalost, "width") == 0
+    assert W.event_int(udalost, "chybi") == 0
+    assert W.event_int(udalost, "chybi", 7) == 7
+    assert W.event_int(udalost, "num", -1) == -1
+
+
+def test_kolecko_na_windows_neshodi_okno(root: tk.Tk) -> None:
+    """Regrese: skutečná událost `<MouseWheel>` z Windows má `num == "??"`.
+
+    Testy si událost vyráběly samy jako `SimpleNamespace(num=0, …)`, což je
+    hezčí, než jaké Tk doopravdy je — chyba proto proklouzla až k uživateli:
+    první otočení kolečka nad libovolným místem aplikace shodilo obsluhu na
+    `ValueError: invalid literal for int() with base 10: '??'`.
+    """
+
+    ramec = W.ScrollableFrame(root)
+    ramec.pack(fill="both", expand=True)
+    for i in range(80):
+        ttk.Label(ramec.body, text=f"položka {i}").pack(anchor="w")
+    root.update()
+
+    windows_dolu = SimpleNamespace(
+        num="??",
+        delta=-120,
+        x_root=ramec.canvas.winfo_rootx() + 20,
+        y_root=ramec.canvas.winfo_rooty() + 20,
+    )
+
+    assert ramec.handle_wheel(windows_dolu) is True
+    root.update()
+    assert ramec.canvas.yview()[0] > 0.0
+    # a stejnou cestou, jakou událost chodí za běhu — přes obsluhu na okně
+    assert W._dispatch_wheel(root, windows_dolu) == "break"
 
 
 def test_scrollable_frame_roluje_koleckem(root: tk.Tk) -> None:
@@ -216,6 +319,35 @@ def test_scrollable_frame_roluje_koleckem(root: tk.Tk) -> None:
     # Obsluha na okně najde správnou plochu.
     assert W._dispatch_wheel(root, dolu) == "break"
     assert W._dispatch_wheel(root, mimo) is None
+
+
+def test_kolecko_nad_comboboxem_nemeni_hodnotu(root: tk.Tk) -> None:
+    """Regrese: rolování formuláře si tiše přepisovalo hodnoty v polích.
+
+    ``ttk`` váže na třídu ``TCombobox`` vlastní obsluhu kolečka, která posune
+    vybranou položku. Formulář „Generovat“ je z comboboxů poskládaný celý, takže
+    kdo kolečkem projel formulář, přepsal si políčka, přes která projel — a
+    v dopise to zjistil až po vygenerování.
+    """
+
+    ramec = W.ScrollableFrame(root)
+    ramec.pack(fill="both", expand=True)
+    combo = ttk.Combobox(ramec.body, values=["text", "víceřádkový", "výběr", "datum"])
+    combo.current(0)
+    combo.pack()
+    for i in range(60):
+        ttk.Label(ramec.body, text=f"položka {i}").pack(anchor="w")
+    root.update()
+
+    # přesně to, co pošle Windows na jedno cvaknutí kolečka dolů
+    combo.event_generate("<MouseWheel>", delta=-120, x=5, y=5)
+    root.update()
+    assert combo.get() == "text", "kolečko přepsalo hodnotu comboboxu"
+
+    # a na X11 chodí kolečko jako tlačítka 4/5
+    combo.event_generate("<Button-5>", x=5, y=5)
+    root.update()
+    assert combo.get() == "text", "kolečko (X11) přepsalo hodnotu comboboxu"
 
 
 def test_scrollable_frame_neroluje_za_vnorene_okno(root: tk.Tk) -> None:

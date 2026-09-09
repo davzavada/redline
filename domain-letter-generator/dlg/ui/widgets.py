@@ -58,7 +58,9 @@ __all__ = [
     "ask_yes_no",
     "busy_cursor",
     "center_on",
+    "event_int",
     "format_date",
+    "neutralize_control_wheel",
     "parse_date",
     "plural_places",
     "run_in_thread",
@@ -67,6 +69,7 @@ __all__ = [
     "show_warning",
     "shorten",
     "validate_date_text",
+    "wrap_to_width",
 ]
 
 #: Značka za popiskem povinného pole.
@@ -267,24 +270,73 @@ WHEEL_SEQUENCES: tuple[str, ...] = ("<MouseWheel>", "<Button-4>", "<Button-5>")
 _WHEEL_TARGETS_ATTR = "_dlg_wheel_targets"
 
 
+def event_int(event: Any, name: str, default: int = 0) -> int:
+    """Číslo z atributu události Tk. Nikdy nevyhodí výjimku.
+
+    Tk vyplňuje **všechna** pole události, i ta, která pro daný typ události
+    nedávají smysl — a místo čísla do nich dosadí řetězec ``"??"``. U
+    ``<MouseWheel>`` na Windows je to ``event.num``, u ``<Button-4>`` /
+    ``<Button-5>`` na X11 zase ``event.delta``. Prosté ``int(event.num)`` proto
+    shodí obsluhu kolečka hned prvním otočením — a protože je obsluha svázaná
+    s oknem, spadne to nad libovolným místem aplikace.
+
+    Testy si událost obvykle vyrábějí samy (``SimpleNamespace(num=0, …)``), takže
+    se chovají hezčeji než skutečné Tk. Veškeré čtení čísel z událostí proto vede
+    přes tuhle jedinou funkci.
+    """
+
+    try:
+        return int(getattr(event, name, default) or default)
+    except (TypeError, ValueError):
+        return default
+
+
 def _wheel_units(event: Any) -> int:
     """Z události kolečka udělá počet „řádků“ (kladné = dolů)."""
 
-    number = int(getattr(event, "num", 0) or 0)
-    if number == 4:
+    number = event_int(event, "num")
+    if number == 4:  # X11 nahoru
         return -1
-    if number == 5:
+    if number == 5:  # X11 dolů
         return 1
 
-    try:
-        delta = int(getattr(event, "delta", 0) or 0)
-    except (TypeError, ValueError):  # pragma: no cover - divná událost
-        return 0
+    delta = event_int(event, "delta")
     if delta == 0:
         return 0
     if abs(delta) >= 120:  # Windows posílá násobky 120
-        return -(delta // 120)
+        steps = abs(delta) // 120
+        return -steps if delta > 0 else steps
     return -1 if delta > 0 else 1  # macOS posílá malá čísla
+
+
+#: Třídy widgetů, které si Tk sám váže na kolečko myši a reaguje na ně změnou
+#: hodnoty. V dlouhém formuláři je to past: uživatel roluje kolečkem a přitom
+#: si přepisuje políčka, kterými zrovna projíždí.
+WHEEL_HUNGRY_CLASSES: tuple[str, ...] = ("TCombobox", "TSpinbox")
+
+
+def neutralize_control_wheel(widget: tk.Misc) -> None:
+    """Zakáže ovládacím prvkům reagovat na kolečko myši.
+
+    ``ttk`` váže na třídu ``TCombobox`` vlastní obsluhu kolečka
+    (``ttk::combobox::Scroll``), takže otočení kolečka nad comboboxem posune
+    vybranou položku o jednu dál — a ještě vyvolá ``<<ComboboxSelected>>``.
+    Formulář „Generovat“ je přitom z comboboxů poskládaný celý: uživatel, který
+    kolečkem projede formulář, si tím tiše přepíše hodnoty v polích, přes která
+    kurzor projel, a v dopise to pozná až po vygenerování.
+
+    Vazba se ruší na úrovni **třídy**, takže platí pro celý interpret Tk — stačí
+    ji zavolat jednou nad kterýmkoli widgetem. Kolečko tím propadne dál na okno,
+    kde ho převezme :class:`ScrollableFrame` a plocha se odroluje. Přesně tak to
+    uživatel čeká.
+    """
+
+    for name in WHEEL_HUNGRY_CLASSES:
+        for sequence in WHEEL_SEQUENCES:
+            try:
+                widget.bind_class(name, sequence, lambda _event: "break")
+            except tk.TclError:  # pragma: no cover - ořezaný Tk
+                continue
 
 
 def _register_wheel(frame: "ScrollableFrame") -> None:
@@ -299,6 +351,9 @@ def _register_wheel(frame: "ScrollableFrame") -> None:
     if not isinstance(targets, list):
         targets = []
         setattr(top, _WHEEL_TARGETS_ATTR, targets)
+        # Jakmile okno umí rolovat kolečkem, nesmí ho ovládacím prvkům užírat
+        # jejich vlastní obsluha — jinak se rolováním přepisují hodnoty polí.
+        neutralize_control_wheel(top)
         for sequence in WHEEL_SEQUENCES:
             try:
                 top.bind(sequence, lambda event, w=top: _dispatch_wheel(w, event), add="+")
@@ -370,7 +425,9 @@ class ScrollableFrame(ttk.Frame):
             self,
             borderwidth=0,
             highlightthickness=0,
-            background=theme.COLOR_SURFACE,
+            # Plátno není ttk widget, motiv ho neobarví — musíme sami, jinak pod
+            # obsahem vykoukne bílý pruh (plátno bývá vyšší než formulář v něm).
+            background=theme.system_background(self),
             takefocus=0,
         )
         self.canvas.grid(row=0, column=0, sticky="nsew")
@@ -400,7 +457,7 @@ class ScrollableFrame(ttk.Frame):
             pass
 
     def _on_canvas_configure(self, event: Any) -> None:
-        width = max(int(getattr(event, "width", 0) or 0), 1)
+        width = max(event_int(event, "width"), 1)
         try:
             self.canvas.itemconfigure(self._window, width=width)
         except tk.TclError:  # pragma: no cover
@@ -443,7 +500,7 @@ class ScrollableFrame(ttk.Frame):
 
         try:
             return self.winfo_containing(
-                int(getattr(event, "x_root", 0) or 0), int(getattr(event, "y_root", 0) or 0)
+                event_int(event, "x_root"), event_int(event, "y_root")
             )
         except (tk.TclError, KeyError, TypeError, ValueError):  # pragma: no cover
             return None
@@ -1385,8 +1442,47 @@ class LabeledDate(LabeledField):
 # ---------------------------------------------------------------------------
 
 
+def wrap_to_width(label: tk.Misc, *, minimum: int = 160) -> tk.Misc:
+    """Zalomí text popisku podle skutečné šířky místo pevného počtu pixelů.
+
+    ``wraplength`` zadaný natvrdo je hádání: v úzkém panelu (levá polovina
+    rozděleného okna umí být i 320 px) se text s ``wraplength=520`` vůbec
+    nezalomí a konec hlášky — typicky ta část, která uživateli říká, co má
+    udělat — zmizí za okrajem.
+
+    Váže se na ``<Configure>`` **rodiče**, ne popisku samotného: změna
+    ``wraplength`` mění velikost popisku, takže by se vlastní událostí uvedl
+    do nekonečného přepočítávání.
+    """
+
+    def prizpusob(event: Any) -> None:
+        sirka = max(int(minimum), event_int(event, "width") - 2)
+        try:
+            label.configure(wraplength=sirka)  # type: ignore[call-arg]
+        except tk.TclError:  # pragma: no cover - widget zanikl
+            pass
+
+    try:
+        parent = label.nametowidget(label.winfo_parent())
+    except (tk.TclError, KeyError):  # pragma: no cover
+        return label
+    parent.bind("<Configure>", prizpusob, add="+")
+    return label
+
+
 class Toolbar(ttk.Frame):
-    """Vodorovná lišta tlačítek nad obsahem pohledu."""
+    """Vodorovná lišta tlačítek nad obsahem pohledu. **Zalamuje se.**
+
+    Původně skládala tlačítka prostým ``pack(side="left")``, takže se do úzkého
+    okna nevešla a poslední tlačítka se uřízla — v pohledu Šablony je jich sedm
+    a potřebují přes 900 px, zatímco obsah při nejmenším povoleném okně
+    (960×640) dostane sotva 720 px. Uživatel pak neviděl „Smazat“ ani „Otevřít
+    složku“ a nedalo se k nim nijak dostat: lišta se nerolovala ani nezalamovala.
+
+    Teď se prvky rozloží do tolika řádků, kolik je potřeba. Když je místa dost,
+    vypadá lišta stejně jako dřív — jeden řádek a prvky přidané s ``side="right"``
+    zarovnané doprava.
+    """
 
     def __init__(
         self,
@@ -1399,6 +1495,17 @@ class Toolbar(ttk.Frame):
         super().__init__(master, padding=padding, **kwargs)
         self.gap = int(gap)
         self.buttons: dict[str, ttk.Button] = {}
+        #: Prvky v pořadí, v jakém je pohled přidal: ``(widget, strana)``.
+        self._items: list[tuple[tk.Misc, str]] = []
+        #: Šířka, pro kterou platí současné rozložení (ať se nepřepočítává zbytečně).
+        self._laid_out_width = -1
+        self.bind("<Configure>", self._on_configure, add="+")
+
+    # -- skládání ------------------------------------------------------
+    def _place(self, widget: tk.Misc, side: str) -> None:
+        self._items.append((widget, "right" if side == "right" else "left"))
+        self._laid_out_width = -1
+        self._relayout()
 
     def add_button(
         self,
@@ -1421,34 +1528,114 @@ class Toolbar(ttk.Frame):
         if width is not None:
             options["width"] = int(width)
         button = ttk.Button(self, **options)
-        button.pack(side=side, padx=(0, self.gap))
         if not enabled:
             button.state(["disabled"])
         self.buttons[key or str(text)] = button
+        self._place(button, side)
         return button
 
     def add_widget(self, widget: tk.Misc, *, side: str = "left", padx: Any = None) -> tk.Misc:
-        widget.pack(side=side, padx=(0, self.gap) if padx is None else padx)
+        del padx  # rozestupy si lišta řídí sama (viz `gap`)
+        self._place(widget, side)
         return widget
 
     def add_label(
         self, text: str = "", *, style: str = "Popisek.TLabel", side: str = "left"
     ) -> ttk.Label:
         label = ttk.Label(self, text=str(text), style=style)
-        label.pack(side=side, padx=(0, self.gap))
+        self._place(label, side)
         return label
 
     def add_separator(self, *, side: str = "left") -> ttk.Separator:
         separator = ttk.Separator(self, orient="vertical")
-        separator.pack(side=side, fill="y", padx=(0, self.gap))
+        self._place(separator, side)
         return separator
 
     def add_spacer(self) -> ttk.Frame:
-        """Pružná mezera — co přijde potom, odsune se doprava."""
+        """Pružná mezera. Zůstává kvůli zpětné kompatibilitě.
+
+        Zarovnání doprava dnes obstará ``side="right"`` v :meth:`add_button`,
+        takže mezera nic nedělá a jen se nezobrazí.
+        """
 
         spacer = ttk.Frame(self)
-        spacer.pack(side="left", fill="x", expand=True)
         return spacer
+
+    # -- rozložení -----------------------------------------------------
+    def _on_configure(self, event: Any = None) -> None:
+        sirka = event_int(event, "width") if event is not None else 0
+        if sirka <= 1:
+            return
+        if sirka == self._laid_out_width:
+            return
+        self._relayout(sirka)
+
+    def _relayout(self, sirka: int = 0) -> None:
+        """Rozloží prvky do řádků podle toho, kolik je místa."""
+
+        if not self._items:
+            return
+        try:
+            k_dispozici = int(sirka) or int(self.winfo_width())
+        except tk.TclError:  # pragma: no cover - okno zaniklo
+            return
+        if k_dispozici <= 1:
+            # Okno ještě nemá rozměry — všechno na jeden řádek, přepočítá se
+            # při prvním <Configure>.
+            k_dispozici = 1 << 30
+
+        leve = [w for w, side in self._items if side == "left"]
+        prave = [w for w, side in self._items if side == "right"]
+        poradi = leve + prave
+
+        def sirka_prvku(widget: tk.Misc) -> int:
+            try:
+                return int(widget.winfo_reqwidth()) + self.gap
+            except tk.TclError:  # pragma: no cover
+                return 0
+
+        celkem = sum(sirka_prvku(w) for w in poradi)
+        vejde_se_na_radek = celkem <= k_dispozici
+
+        for widget in poradi:
+            try:
+                widget.grid_forget()
+            except tk.TclError:  # pragma: no cover
+                pass
+        for sloupec in range(self.grid_size()[0]):
+            self.columnconfigure(sloupec, weight=0, minsize=0)
+
+        if vejde_se_na_radek:
+            # Jeden řádek: levé zleva, pravé zprava (mezi nimi pružný sloupec).
+            sloupec = 0
+            for widget in leve:
+                widget.grid(row=0, column=sloupec, sticky="w", padx=(0, self.gap))
+                sloupec += 1
+            if prave:
+                self.columnconfigure(sloupec, weight=1)
+                sloupec += 1
+                for widget in prave:
+                    widget.grid(row=0, column=sloupec, sticky="e", padx=(0, self.gap))
+                    sloupec += 1
+            self._laid_out_width = k_dispozici if k_dispozici < (1 << 30) else -1
+            return
+
+        # Nevejde se: zalomit do řádků, všechno zarovnané doleva.
+        radek = sloupec = 0
+        na_radku = 0
+        for widget in poradi:
+            potreba = sirka_prvku(widget)
+            if sloupec and na_radku + potreba > k_dispozici:
+                radek += 1
+                sloupec = 0
+                na_radku = 0
+            widget.grid(
+                row=radek, column=sloupec, sticky="w",
+                padx=(0, self.gap), pady=(0, self.gap if radek else 0),
+            )
+            sloupec += 1
+            na_radku += potreba
+        self._laid_out_width = k_dispozici
 
     def set_enabled(self, key: str, enabled: bool = True) -> None:
         button = self.buttons.get(key)
@@ -1552,7 +1739,9 @@ class Card(ttk.Frame):
         if not subtitle:
             self.subtitle_label.grid_remove()
 
-        self.body = ttk.Frame(self, style=style)
+        # Obyčejný rámec, ne `style` karty: `Karta.TFrame` má vlastní 1px
+        # rámeček, takže by se nakreslil podruhé — uvnitř karty, přes obsah.
+        self.body = ttk.Frame(self)
         self.body.columnconfigure(0, weight=1)
         self.body.grid(row=2, column=0, sticky="nsew", pady=(theme.PAD_M, 0))
         self.rowconfigure(2, weight=1)

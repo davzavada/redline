@@ -22,6 +22,7 @@ from typing import Any, Callable
 import pytest
 
 tk = pytest.importorskip("tkinter", reason="tkinter není k dispozici")
+from tkinter import ttk  # noqa: E402  (až po importorskip)
 
 from fixtures import document_xml, make_docx, text_paragraph  # noqa: E402
 
@@ -166,6 +167,63 @@ def test_okno_nastartuje_a_ma_cesky_titulek(app: app_module.App) -> None:
     assert app.title() == f"{APP_NAME} {__version__}"
     assert app.winfo_exists()
     assert app.minsize() == tuple(theme.WINDOW_MIN_SIZE)
+
+
+def test_zkratky_neplati_v_modalnim_dialogu(app: app_module.App) -> None:
+    """Regrese: Ctrl+Q stisknuté v modálním dialogu zavřelo celou aplikaci.
+
+    Zkratky se vázaly přes ``bind_all``, tedy na značku ``all``, kterou nese
+    každý widget aplikace — i widgety v modálních dialozích. Modální
+    ``grab_set()`` proti tomu nechrání, takže překlep v poli „Název šablony“
+    zavřel aplikaci i s rozdělanou prací.
+    """
+
+    app.update()
+    dialog = tk.Toplevel(app)
+    dialog.transient(app)
+    dialog.grab_set()
+    entry = ttk.Entry(dialog)
+    entry.pack()
+    entry.focus_set()
+    app.update()
+
+    try:
+        entry.event_generate("<Control-q>")
+        app.update()
+        assert app.winfo_exists(), "Ctrl+Q v dialogu zavřelo celou aplikaci"
+        entry.event_generate("<Control-g>")
+        entry.event_generate("<Control-o>")
+        entry.event_generate("<F5>")
+        app.update()
+        assert app.winfo_exists()
+    finally:
+        try:
+            dialog.grab_release()
+            dialog.destroy()
+        except tk.TclError:  # pragma: no cover
+            pass
+
+
+def test_zkratky_plati_v_hlavnim_okne(app: app_module.App) -> None:
+    """Zkratky musí dál fungovat i s kurzorem uvnitř formuláře v hlavním okně.
+
+    Vazba na okno (místo ``bind_all``) se na potomky přenáší přes ``bindtags`` —
+    značku toplevelu nese každý widget uvnitř okna. Test to ověřuje na vlastní
+    sekvenci, aby si nelezl do cesty s obsluhami aplikace (ty vracejí ``break``).
+    """
+
+    app.update()
+    stisky: list[str] = []
+    app.bind("<Control-y>", lambda _e: stisky.append("y"), add="+")
+    pole = ttk.Entry(app)
+    pole.grid()
+    pole.focus_set()
+    app.update()
+
+    pole.event_generate("<Control-y>")
+    app.update()
+    assert stisky == ["y"], "zkratka nedorazila z widgetu uvnitř hlavního okna"
+    pole.destroy()
 
 
 def test_navigace_ma_ctyri_ceske_polozky(app: app_module.App) -> None:
@@ -353,7 +411,11 @@ def test_neulozene_zmeny_poli_se_hlidaji(
     "sequence", ["<Control-g>", "<Control-o>", "<F5>", "<Control-q>"]
 )
 def test_zkratky_jsou_navazane(app: app_module.App, sequence: str) -> None:
-    assert app.bind_all(sequence), f"zkratka {sequence} chybí"
+    # Vázané na OKNO, ne přes bind_all — jinak by platily i v modálních dialozích.
+    assert app.bind(sequence), f"zkratka {sequence} chybí"
+    assert not app.bind_all(sequence), (
+        f"zkratka {sequence} visí na značce „all“, takže by platila i v dialozích"
+    )
 
 
 def test_ctrl_g_prepne_a_pak_generuje(

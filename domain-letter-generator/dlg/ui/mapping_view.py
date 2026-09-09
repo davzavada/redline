@@ -389,7 +389,7 @@ class MappingView(ttk.Frame):
             borderwidth=1,
             relief="solid",
             highlightthickness=0,
-            background=theme.COLOR_BG,
+            background=theme.system_background(self),
             foreground=theme.COLOR_TEXT,
             padx=theme.PAD_S,
             pady=theme.PAD_S - 2,
@@ -817,7 +817,7 @@ class MappingView(ttk.Frame):
         dialog.title("Sloučit pole")
         dialog.transient(self.winfo_toplevel())
         dialog.resizable(False, False)
-        dialog.configure(background=theme.COLOR_SURFACE)
+        dialog.configure(background=theme.system_background(dialog))
 
         body = ttk.Frame(dialog, padding=theme.PAD_L)
         body.grid(row=0, column=0, sticky="nsew")

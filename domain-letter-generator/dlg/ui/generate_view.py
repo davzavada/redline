@@ -206,10 +206,13 @@ class GenerateView(ttk.Frame):
 
         #: Zavolá se po úspěšném vygenerování; dostane cestu k souboru.
         self.on_generated: Callable[..., Any] | None = None
+        #: Zavolá se, když pohled sám změní nastavení (volba PDF), ať se uloží.
+        self.on_settings_changed: Callable[..., Any] | None = None
 
         self.meta: TemplateMeta | None = None
         self.scan: Any = None
         self.last_output_path: Path | None = None
+        self.last_pdf_path: Path | None = None
         self.last_report: FillReport | None = None
 
         self._docx: bytes = b""
@@ -339,8 +342,10 @@ class GenerateView(ttk.Frame):
         )
         self.output_label.grid(row=1, column=0, columnspan=3, sticky="w", pady=(2, 0))
 
+        self._build_pdf_option(footer)
+
         self.toolbar = widgets.Toolbar(footer, padding=(0, theme.PAD_M, 0, 0))
-        self.toolbar.grid(row=2, column=0, columnspan=3, sticky="ew")
+        self.toolbar.grid(row=3, column=0, columnspan=3, sticky="ew")
         self.toolbar.add_button("Generovat", self.generate, primary=True, key="generovat")
         self.toolbar.add_button(
             "Generovat a otevřít", lambda: self.generate(open_after=True), key="generovat_otevrit"
@@ -348,6 +353,55 @@ class GenerateView(ttk.Frame):
         self.toolbar.add_button(
             "Otevřít složku s výstupy", self.open_output_dir, side="right", key="slozka"
         )
+
+    def _build_pdf_option(self, footer: tk.Misc) -> None:
+        """Zaškrtávátko „uložit i PDF“.
+
+        PDF vyrábí Word (nebo LibreOffice), který je na počítači — aplikace sama
+        žádnou knihovnu na PDF nemá, viz :mod:`dlg.pdf`. Když tu není čím
+        převádět, volba se nenabízí vůbec; nabízet ji a pak selhat by bylo horší
+        než ji neukázat.
+        """
+
+        from .. import pdf as pdf_module  # importuje se až tady, ne při startu
+
+        self.pdf_var = tk.BooleanVar(
+            master=self, value=bool(getattr(self.settings(), "export_pdf", False))
+        )
+        self._pdf_converter = pdf_module.converter_name()
+        if not self._pdf_converter:
+            self.pdf_check = None
+            self.pdf_var.set(False)
+            return
+
+        self.pdf_check = ttk.Checkbutton(
+            footer,
+            text="Uložit vedle dopisu i PDF",
+            variable=self.pdf_var,
+            command=self._on_pdf_toggled,
+        )
+        self.pdf_check.grid(row=2, column=0, columnspan=3, sticky="w", pady=(theme.PAD_S, 0))
+
+    def _on_pdf_toggled(self) -> None:
+        """Volbu si aplikace pamatuje — příště bude zaškrtnutá stejně."""
+
+        try:
+            settings = self.settings()
+            settings.export_pdf = bool(self.pdf_var.get())
+            _invoke(self.on_settings_changed, settings)
+        except Exception:  # noqa: BLE001 - nezapamatovaná volba není důvod spadnout
+            pass
+
+    def wants_pdf(self) -> bool:
+        """Má se vedle dopisu uložit i PDF?"""
+
+        variable = getattr(self, "pdf_var", None)
+        if variable is None or getattr(self, "pdf_check", None) is None:
+            return False
+        try:
+            return bool(variable.get())
+        except Exception:  # noqa: BLE001 - widget už nemusí existovat
+            return False
 
     # ------------------------------------------------------------------
     # nastavení a seznam šablon
@@ -510,9 +564,11 @@ class GenerateView(ttk.Frame):
         self._specs = []
         self._paragraph_vars = []
         self.form_area.clear()
-        ttk.Label(
-            self.form_area.body, style="Napoveda.TLabel", text=message, wraplength=520,
-            justify="left",
+        widgets.wrap_to_width(
+            ttk.Label(
+                self.form_area.body, style="Napoveda.TLabel", text=message,
+                wraplength=320, justify="left",
+            )
         ).grid(row=0, column=0, sticky="w")
         self.description_label.configure(text="")
         self._set_preview_text("", ())
@@ -535,12 +591,14 @@ class GenerateView(ttk.Frame):
             row = 0
 
             if not self._specs:
-                ttk.Label(
-                    body,
-                    style="Napoveda.TLabel",
-                    text="Šablona nemá žádná pole. Doplňte je v části „Pole šablony“.",
-                    wraplength=520,
-                    justify="left",
+                widgets.wrap_to_width(
+                    ttk.Label(
+                        body,
+                        style="Napoveda.TLabel",
+                        text="Šablona nemá žádná pole. Doplňte je v části „Pole šablony“.",
+                        wraplength=320,
+                        justify="left",
+                    )
                 ).grid(row=row, column=0, sticky="w")
                 row += 1
 
@@ -560,12 +618,14 @@ class GenerateView(ttk.Frame):
                     row=row, column=0, sticky="w"
                 )
                 row += 1
-                ttk.Label(
-                    body,
-                    style="Napoveda.TLabel",
-                    text="Odškrtnutý odstavec se do dopisu nedostane.",
-                    wraplength=520,
-                    justify="left",
+                widgets.wrap_to_width(
+                    ttk.Label(
+                        body,
+                        style="Napoveda.TLabel",
+                        text="Odškrtnutý odstavec se do dopisu nedostane.",
+                        wraplength=320,
+                        justify="left",
+                    )
                 ).grid(row=row, column=0, sticky="w", pady=(2, theme.PAD_S))
                 row += 1
 
@@ -1087,11 +1147,28 @@ class GenerateView(ttk.Frame):
                     self.status.set("Generování zrušeno.")
                     return
 
-            def save() -> Path:
-                return _save_docx(directory, stem, filled)
+            chce_pdf = self.wants_pdf()
 
-            def done(path: Path) -> None:
-                self._finish(path, report, values, should_open)
+            def save() -> tuple[Path, "Path | None", str]:
+                # Dopis se uloží VŽDYCKY; PDF je nadstavba. Když převod selže,
+                # vrátíme důvod a .docx zůstane, jak byl — nesmí se stát, že
+                # kvůli chybějícímu Wordu přijde uživatel o hotový dopis.
+                path = _save_docx(directory, stem, filled)
+                if not chce_pdf:
+                    return path, None, ""
+                from .. import pdf as pdf_module  # importuje se až tady
+
+                try:
+                    return path, pdf_module.convert(path), ""
+                except Exception as exc:  # noqa: BLE001 - PDF nesmí shodit uložení
+                    return path, None, str(exc)
+
+            def done(result: tuple[Path, "Path | None", str]) -> None:
+                path, pdf_path, pdf_problem = result
+                self._finish(
+                    path, report, values, should_open,
+                    pdf_path=pdf_path, pdf_problem=pdf_problem,
+                )
 
             def failed(exc: BaseException) -> None:
                 self._set_busy(False)
@@ -1116,7 +1193,14 @@ class GenerateView(ttk.Frame):
         return True
 
     def _finish(
-        self, path: Path, report: FillReport, values: Mapping[str, str], should_open: bool
+        self,
+        path: Path,
+        report: FillReport,
+        values: Mapping[str, str],
+        should_open: bool,
+        *,
+        pdf_path: "Path | None" = None,
+        pdf_problem: str = "",
     ) -> None:
         self._set_busy(False)
         self.status.idle()
@@ -1135,9 +1219,15 @@ class GenerateView(ttk.Frame):
                 pass
             self._refresh_suggestions()
 
-        self.status.success(f"Hotovo — dopis je uložený v {path}.")
+        self.last_pdf_path = Path(pdf_path) if pdf_path else None
+        if pdf_path:
+            self.status.success(f"Hotovo — dopis i PDF jsou uložené v {path.parent}.")
+        else:
+            self.status.success(f"Hotovo — dopis je uložený v {path}.")
 
         notes = list(report.warnings)
+        if pdf_problem:
+            notes.append(pdf_problem)
         remaining = self.unfilled_placeholders(report)
         if remaining:
             listed = ", ".join(remaining[:MAX_LISTED_UNFILLED])

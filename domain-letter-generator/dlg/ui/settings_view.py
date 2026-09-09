@@ -113,7 +113,7 @@ class ProfileEntryDialog(tk.Toplevel):
         except tk.TclError:  # pragma: no cover - okno bez rodiče
             pass
         self.resizable(False, False)
-        self.configure(background=theme.COLOR_SURFACE)
+        self.configure(background=theme.system_background(self))
 
         body = ttk.Frame(self, padding=theme.PAD_L)
         body.grid(row=0, column=0, sticky="nsew")
@@ -853,7 +853,7 @@ class SettingsView(ttk.Frame):
     def _on_profile_double_click(self, event: Any = None) -> str | None:
         row = ""
         try:
-            row = str(self.profile_tree.identify_row(int(getattr(event, "y", 0) or 0)))
+            row = str(self.profile_tree.identify_row(widgets.event_int(event, "y")))
         except (tk.TclError, TypeError, ValueError):  # pragma: no cover
             row = ""
         if row and row in self._profile:

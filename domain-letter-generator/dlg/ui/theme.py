@@ -1,8 +1,13 @@
-"""Vzhled aplikace: ttk styly, barvy, odsazení a písma.
+"""Vzhled aplikace: ttk styly, odsazení a písma.
+
+Aplikace **nemá vlastní vzhled**. Ovládací prvky kreslí ttk motiv operačního
+systému, takže na Windows vypadají jako ve zbytku systému a nemůžou se rozejít
+s tím, co motiv umí. Styly níž rozlišují prvky jen písmem a odsazením; jediná
+barva, která něco znamená, je červená u chyb.
 
 Modul jde naimportovat i na stroji bez displeje — samotný import nevytváří
-okno ani interpret Tk. Barvy a odsazení jsou obyčejné konstanty, styly vzniknou
-až voláním :func:`apply_theme` nad už existujícím oknem.
+okno ani interpret Tk. Konstanty jsou obyčejná data, styly vzniknou až voláním
+:func:`apply_theme` nad už existujícím oknem.
 
 Pořadí při startu aplikace::
 
@@ -20,14 +25,13 @@ Pojmenované styly, na které se smí spoléhat zbytek aplikace (viz
     Popisek.TLabel       popisek formulářového pole
     Napoveda.TLabel      drobná šedá nápověda pod polem
     Chyba.TLabel         chybová hláška (červená)
-    Uspech.TLabel        potvrzení akce (zelená)
-    Primary.TButton      hlavní tlačítko dialogu / pohledu
-    Nebezpecne.TButton   destruktivní akce (Smazat)
+    Uspech.TLabel        potvrzení akce
+    Primary.TButton      hlavní tlačítko dialogu / pohledu (tučně)
+    Nebezpecne.TButton   destruktivní akce (Smazat) — červené písmo
     Karta.TFrame         rámeček karty (1px rámeček)
-    Nav.TFrame           podklad svislé navigace
-    Nav.TLabel           text na podkladu navigace
+    Nav.TLabel           text v navigaci
     Nav.TButton          položka svislé navigace
-    Nav.Selected.TButton vybraná položka svislé navigace
+    Nav.Selected.TButton vybraná položka svislé navigace (tučně)
     Chyba.TEntry         vstupní pole s chybou
     Chyba.TCombobox      combobox s chybou
     Treeview             tabulka s vyšším řádkem (viz ROW_HEIGHT)
@@ -75,37 +79,44 @@ __all__ = [
     "font_name",
     "is_windows",
     "preferred_theme_names",
+    "system_background",
 ]
 
 # --- barvy -------------------------------------------------------------------
-# Světlá, střízlivá paleta; modrá je jediný výrazný akcent (advokátní aplikace).
+# Záměrně skoro žádné barvy. Aplikace je PoC — ovládací prvky (tlačítka, pole,
+# tabulky, posuvníky) si kreslí sám ttk motiv operačního systému, takže vypadají
+# přesně jako ve zbytku Windows a nikde se nemůžou rozejít s tím, co motiv umí.
+#
+# Konstanty níž slouží jen tam, kde ttk motiv NENÍ ve hře, tedy u obyčejných
+# ``tk`` widgetů (``tk.Text``, ``tk.Listbox``, ``tk.Canvas``, ``tk.Toplevel``).
+# U nich barvy fungují spolehlivě na všech platformách a bez jejich nastavení by
+# se plochy rozjely s okolím. Viz :func:`_configure_styles`, kde je vysvětlené,
+# proč se ttk prvky nebarví vůbec.
 
-#: Plocha obsahu, karty, vstupní pole.
+#: Plocha textových polí a seznamů.
 COLOR_SURFACE = "#ffffff"
-#: Okno a svislá navigace — o odstín tmavší než obsah.
-COLOR_BG = "#eef1f5"
-#: Linky, rámečky, oddělovače.
-COLOR_BORDER = "#c9d1da"
+#: Podklad odstavených ploch (detail chyby) — šeď výchozího okna Windows.
+COLOR_BG = "#f0f0f0"
+#: Linky a rámečky.
+COLOR_BORDER = "#b0b0b0"
 #: Základní barva textu.
-COLOR_TEXT = "#1b2733"
-#: Doplňkový text (nápovědy, stavový řádek).
-COLOR_TEXT_MUTED = "#5a6a7a"
-#: Akcent — tlačítka, výběr v navigaci.
-COLOR_ACCENT = "#1f4e79"
-#: Akcent pod kurzorem / stisknutý.
-COLOR_ACCENT_ACTIVE = "#17395a"
-#: Světlý akcent — podbarvení výběru.
-COLOR_ACCENT_SOFT = "#dbe6f1"
-#: Chyba.
+COLOR_TEXT = "#000000"
+#: Doplňkový text (nápovědy, stavový řádek) — šedý, ale ještě čitelný.
+COLOR_TEXT_MUTED = "#5a5a5a"
+#: Zvýraznění (výběr textu, vyplněná místa v náhledu). Neutrální šeď, ne barva.
+COLOR_ACCENT = "#333333"
+COLOR_ACCENT_ACTIVE = "#000000"
+COLOR_ACCENT_SOFT = "#dcdcdc"
+#: Chyba. Jediná skutečná barva v aplikaci — nese informaci, ne ozdobu.
 COLOR_ERROR = "#a4262c"
 #: Podbarvení pole s chybou.
-COLOR_ERROR_SOFT = "#fdf5f5"
-#: Potvrzení, hotovo.
-COLOR_SUCCESS = "#1e7d34"
+COLOR_ERROR_SOFT = "#fdf3f3"
+#: Potvrzení, hotovo. Bez barvy — potvrzení nese text, ne odstín.
+COLOR_SUCCESS = "#1b1b1b"
 #: Varování.
-COLOR_WARNING = "#8a6d1f"
+COLOR_WARNING = "#6b4e00"
 #: Nedostupné ovládací prvky.
-COLOR_DISABLED = "#95a3b1"
+COLOR_DISABLED = "#8d8d8d"
 
 #: Všechny barvy pohromadě — hodí se pro ``tk`` widgety (Canvas, Text, …).
 COLORS: dict[str, str] = {
@@ -162,10 +173,10 @@ STYLE_NAMES: tuple[str, ...] = (
     "Napoveda.TLabel",
     "Chyba.TLabel",
     "Uspech.TLabel",
+    "Zvyrazneno.TLabel",
     "Primary.TButton",
     "Nebezpecne.TButton",
     "Karta.TFrame",
-    "Nav.TFrame",
     "Nav.TLabel",
     "Nav.TButton",
     "Nav.Selected.TButton",
@@ -187,6 +198,23 @@ def preferred_theme_names() -> tuple[str, ...]:
     if is_windows():
         return ("vista", "winnative", "clam", "default")
     return ("clam", "default")
+
+
+def system_background(widget: tk.Misc | None = None) -> str:
+    """Barva, kterou ttk motiv kreslí rámce — pro obyčejné ``tk`` widgety.
+
+    ``tk.Canvas``, ``tk.Toplevel`` a spol. ttk styly neumí; bez téhle hodnoty
+    by si vzaly svou vlastní výchozí barvu a udělaly v okně světlou díru
+    (přesně tak vykukovalo plátno rolovatelné plochy pod posledním polem
+    formuláře). Ptáme se proto přímo motivu, čím kreslí ``TFrame``, takže se
+    aplikace trefí do vzhledu systému, ať běží kdekoli.
+    """
+
+    try:
+        value = str(ttk.Style(widget).lookup("TFrame", "background") or "")
+    except tk.TclError:  # pragma: no cover - okno zaniklo / ořezaný Tk
+        value = ""
+    return value or COLOR_BG
 
 
 def enable_dpi_awareness() -> bool:
@@ -218,13 +246,6 @@ def enable_dpi_awareness() -> bool:
 
 
 # --- písma: pomocné funkce ---------------------------------------------------
-
-
-def _font_families(root: tk.Misc | None) -> set[str]:
-    try:
-        return {str(name) for name in tkfont.families(root)}
-    except Exception:
-        return set()
 
 
 def _existing_font_names(root: tk.Misc | None) -> set[str]:
@@ -261,23 +282,57 @@ def font_name(name: str, root: tk.Misc | None = None) -> str:
     return FONT_BASE
 
 
+def _accepts_family(font: tkfont.Font, family: str) -> bool:
+    """Zkusí písmu nastavit rodinu a zeptá se, jestli ji Tk opravdu vzalo.
+
+    Levnější než výčet rodin: Tk u neznámé rodiny tiše degraduje na náhradní,
+    takže se to pozná jedním dotazem ``actual("family")``.
+    """
+
+    try:
+        font.configure(family=family)
+        return str(font.actual("family") or "").casefold() == family.casefold()
+    except Exception:
+        return False
+
+
 def configure_fonts(root: tk.Misc) -> str:
     """Nastaví systémová písma. Na Windows Segoe UI 10, jinde nechá výchozí.
 
     Vrací název použité rodiny písma (prázdný řetězec = ponecháno výchozí).
     Funkce nikdy nespadne — chybějící písmo prostě znamená výchozí vzhled.
+
+    Rodina se **nehledá výčtem**. ``tkfont.families()`` projde na Windows přes
+    ``EnumFontFamiliesEx`` všechna nainstalovaná písma (v kanceláři jich bývají
+    stovky) jen proto, aby se ověřila tři jména — a děje se to ještě předtím,
+    než se ukáže okno. Místo toho se rodina rovnou zkusí nastavit a jedním
+    dotazem se ověří, jestli ji Tk přijalo.
     """
 
     if not is_windows():
         return ""
 
-    families = _font_families(root)
+    base = _nametofont(FONT_BASE, root)
+    if base is None:
+        return ""
+
+    try:
+        puvodni = str(base.actual("family") or "")
+    except Exception:
+        puvodni = ""
+
     family = ""
     for candidate in WINDOWS_FONT_CANDIDATES:
-        if candidate in families:
+        if _accepts_family(base, candidate):
             family = candidate
             break
     if not family:
+        # nic z kandidátů tu není — vrátit původní rodinu a nechat výchozí vzhled
+        if puvodni:
+            try:
+                base.configure(family=puvodni)
+            except Exception:
+                pass
         return ""
 
     sizes = {
@@ -332,10 +387,21 @@ def _font_registry(root: tk.Misc) -> dict[str, tkfont.Font]:
     return registry
 
 
-def _derive_font(root: tk.Misc, name: str, *, delta: int = 0, weight: str = "normal") -> str:
-    """Vytvoří (nebo přenastaví) pojmenované písmo odvozené od základního."""
+def _derive_font(
+    root: tk.Misc,
+    name: str,
+    *,
+    delta: int = 0,
+    weight: str = "normal",
+    metrics: "tuple[str, int, bool] | None" = None,
+) -> str:
+    """Vytvoří (nebo přenastaví) pojmenované písmo odvozené od základního.
 
-    family, size, in_pixels = _base_metrics(root)
+    ``metrics`` se dá předat, aby se rodina a velikost základního písma
+    nezjišťovaly znovu u každého odvozeného písma (viz :func:`_create_fonts`).
+    """
+
+    family, size, in_pixels = metrics if metrics is not None else _base_metrics(root)
     new_size = max(1, size + delta)
     if in_pixels:
         new_size = -new_size
@@ -362,10 +428,13 @@ def _derive_font(root: tk.Misc, name: str, *, delta: int = 0, weight: str = "nor
 
 
 def _create_fonts(root: tk.Misc) -> None:
-    _derive_font(root, FONT_BOLD, delta=0, weight="bold")
-    _derive_font(root, FONT_SMALL, delta=-1)
-    _derive_font(root, FONT_HEADING, delta=6, weight="bold")
-    _derive_font(root, FONT_SUBHEADING, delta=2, weight="bold")
+    # Metriky základního písma se mezi odvozenými písmy nemění — stačí je
+    # zjistit jednou místo čtyřikrát (každé zjištění je několik dotazů do Tk).
+    metrics = _base_metrics(root)
+    _derive_font(root, FONT_BOLD, delta=0, weight="bold", metrics=metrics)
+    _derive_font(root, FONT_SMALL, delta=-1, metrics=metrics)
+    _derive_font(root, FONT_HEADING, delta=6, weight="bold", metrics=metrics)
+    _derive_font(root, FONT_SUBHEADING, delta=2, weight="bold", metrics=metrics)
 
 
 # --- styly -------------------------------------------------------------------
@@ -394,186 +463,79 @@ def _use_theme(style: ttk.Style, names: Iterable[str]) -> str:
 
 
 def _configure_styles(style: ttk.Style, root: tk.Misc) -> None:
+    """Nastaví pojmenované styly. Rozlišuje **jen písmem a odsazením**.
+
+    Klíčové pravidlo: ovládací prvky se **nebarví**. Nativní motivy Windows
+    (``vista``, ``winnative``) si tlačítko, vstupní pole i záhlaví tabulky
+    kreslí jako obrázek od systému a volby ``background`` / ``bordercolor`` /
+    ``lightcolor`` / ``darkcolor`` prostě zahodí — ``foreground`` a ``font``
+    ale respektují. Kdo tedy nastaví obojí (bílé písmo na modrém podkladu),
+    dostane na Linuxu modré tlačítko a na Windows bílé písmo na světle šedém
+    nativním tlačítku, tedy nečitelnou skvrnu. Přesně tak vypadalo tlačítko
+    „Generovat“.
+
+    Proto se tady nastavuje jen to, co dopadne všude stejně:
+
+    * ``font``    — hlavní tlačítko a vybraná položka navigace jsou tučně,
+    * ``padding`` — odsazení,
+    * ``foreground`` u **popisků** (``TLabel``), kde žádné nativní kreslení
+      není a barva se tedy uplatní spolehlivě,
+    * ``rowheight`` u tabulek (čitelnost).
+
+    Zbytek vzhledu je práce motivu operačního systému. Aplikace tak vypadá jako
+    každý jiný program na daném systému a nemá vlastní vzhled, který by se
+    mohl rozbít.
+    """
+
     heading = font_name(FONT_HEADING, root)
     subheading = font_name(FONT_SUBHEADING, root)
     small = font_name(FONT_SMALL, root)
     bold = font_name(FONT_BOLD, root)
     base = font_name(FONT_BASE, root)
 
-    # Výchozí vzhled všeho — díky tomu ladí popisky s podkladem i tam,
-    # kde pohled použije obyčejný ttk.Frame bez vlastního stylu.
-    style.configure(
-        ".",
-        background=COLOR_SURFACE,
-        foreground=COLOR_TEXT,
-        fieldbackground=COLOR_SURFACE,
-        bordercolor=COLOR_BORDER,
-        darkcolor=COLOR_SURFACE,
-        lightcolor=COLOR_SURFACE,
-        troughcolor=COLOR_BG,
-        font=base,
-    )
-    style.configure("TFrame", background=COLOR_SURFACE)
-    style.configure("TLabelframe", background=COLOR_SURFACE, bordercolor=COLOR_BORDER)
-    style.configure("TLabelframe.Label", background=COLOR_SURFACE, font=bold)
-    style.configure("TLabel", background=COLOR_SURFACE, foreground=COLOR_TEXT)
-    style.configure("TSeparator", background=COLOR_BORDER)
-    style.configure("TCheckbutton", background=COLOR_SURFACE)
-    style.configure("TRadiobutton", background=COLOR_SURFACE)
-    style.configure("TNotebook", background=COLOR_BG, bordercolor=COLOR_BORDER)
-    style.configure("TNotebook.Tab", padding=(PAD_M, PAD_S))
-
-    # Podklad okna a svislé navigace.
-    style.configure("Okno.TFrame", background=COLOR_BG)
-    style.configure("Nav.TFrame", background=COLOR_BG)
-    style.configure(
-        "Nav.TLabel", background=COLOR_BG, foreground=COLOR_TEXT_MUTED, font=small
-    )
-
-    # Karta = bílá plocha s tenkým rámečkem.
-    style.configure(
-        "Karta.TFrame",
-        background=COLOR_SURFACE,
-        bordercolor=COLOR_BORDER,
-        lightcolor=COLOR_BORDER,
-        darkcolor=COLOR_BORDER,
-        relief="solid",
-        borderwidth=1,
-    )
-
-    # Texty.
-    style.configure("Nadpis.TLabel", font=heading, foreground=COLOR_TEXT)
-    style.configure("Podnadpis.TLabel", font=subheading, foreground=COLOR_TEXT)
-    style.configure("Popisek.TLabel", font=base, foreground=COLOR_TEXT)
+    # --- texty ---------------------------------------------------------------
+    # U popisků je barva bezpečná: ttk je kreslí sám na všech motivech.
+    style.configure("Nadpis.TLabel", font=heading)
+    style.configure("Podnadpis.TLabel", font=subheading)
+    style.configure("Popisek.TLabel", font=base)
     style.configure("Napoveda.TLabel", font=small, foreground=COLOR_TEXT_MUTED)
     style.configure("Chyba.TLabel", font=small, foreground=COLOR_ERROR)
-    style.configure("Uspech.TLabel", font=small, foreground=COLOR_SUCCESS)
-    style.configure("Zvyrazneno.TLabel", font=bold, foreground=COLOR_TEXT)
+    style.configure("Uspech.TLabel", font=small)
+    style.configure("Zvyrazneno.TLabel", font=bold)
 
-    # Tlačítka.
-    style.configure("TButton", padding=(PAD_M, PAD_S), font=base)
-    style.configure(
-        "Primary.TButton",
-        font=bold,
-        foreground=COLOR_SURFACE,
-        background=COLOR_ACCENT,
-        bordercolor=COLOR_ACCENT,
-        lightcolor=COLOR_ACCENT,
-        darkcolor=COLOR_ACCENT,
-        focuscolor=COLOR_SURFACE,
-    )
-    style.map(
-        "Primary.TButton",
-        background=[
-            ("disabled", COLOR_DISABLED),
-            ("pressed", COLOR_ACCENT_ACTIVE),
-            ("active", COLOR_ACCENT_ACTIVE),
-        ],
-        foreground=[("disabled", COLOR_BG), ("!disabled", COLOR_SURFACE)],
-        bordercolor=[("!disabled", COLOR_ACCENT)],
-    )
+    # --- tlačítka ------------------------------------------------------------
+    style.configure("TButton", padding=(PAD_M, PAD_S))
+    # Hlavní akce se pozná tučným písmem, ne barvou.
+    style.configure("Primary.TButton", font=bold, padding=(PAD_M, PAD_S))
+    # Destruktivní akce červeným písmem. Tmavě červená na světlém nativním
+    # tlačítku je čitelná všude — na rozdíl od bílé.
     style.configure("Nebezpecne.TButton", foreground=COLOR_ERROR)
-    style.map(
-        "Nebezpecne.TButton",
-        foreground=[("disabled", COLOR_DISABLED), ("!disabled", COLOR_ERROR)],
+    style.map("Nebezpecne.TButton", foreground=[("disabled", COLOR_DISABLED)])
+
+    # --- svislá navigace -----------------------------------------------------
+    # Široké položky zarovnané doleva; vybraná je tučně.
+    style.configure("Nav.TButton", anchor="w", padding=(PAD_M, PAD_S + 2), font=base)
+    style.configure(
+        "Nav.Selected.TButton", anchor="w", padding=(PAD_M, PAD_S + 2), font=bold
+    )
+    style.configure("Nav.TLabel", font=small, foreground=COLOR_TEXT_MUTED)
+
+    # --- karta ---------------------------------------------------------------
+    # Rámeček karty odděluje sekce; kreslí ho ttk výchozí barvou motivu.
+    style.configure("Karta.TFrame", relief="solid", borderwidth=1)
+
+    # --- vstupní pole --------------------------------------------------------
+    style.configure("TEntry", padding=(PAD_S, PAD_S - 1))
+    style.configure("TCombobox", padding=(PAD_S, PAD_S - 1))
+    # Pole s chybou. Na nativním motivu Windows se podbarvení neuplatní (motiv
+    # si pole kreslí sám) — na chybu proto vždycky upozorňuje i červený popisek
+    # pod polem, viz widgets.LabeledField. Tady jde jen o bonus tam, kde funguje.
+    style.configure("Chyba.TEntry", padding=(PAD_S, PAD_S - 1), fieldbackground=COLOR_ERROR_SOFT)
+    style.configure(
+        "Chyba.TCombobox", padding=(PAD_S, PAD_S - 1), fieldbackground=COLOR_ERROR_SOFT
     )
 
-    # Svislá navigace: široké, doleva zarovnané položky.
-    style.configure(
-        "Nav.TButton",
-        anchor="w",
-        padding=(PAD_M, PAD_S + 2),
-        font=base,
-        relief="flat",
-        background=COLOR_BG,
-        foreground=COLOR_TEXT,
-        bordercolor=COLOR_BG,
-        lightcolor=COLOR_BG,
-        darkcolor=COLOR_BG,
-        focuscolor=COLOR_BG,
-    )
-    style.map(
-        "Nav.TButton",
-        background=[("pressed", COLOR_ACCENT_SOFT), ("active", COLOR_ACCENT_SOFT)],
-        foreground=[("disabled", COLOR_DISABLED), ("!disabled", COLOR_TEXT)],
-    )
-    style.configure(
-        "Nav.Selected.TButton",
-        anchor="w",
-        padding=(PAD_M, PAD_S + 2),
-        font=bold,
-        relief="flat",
-        background=COLOR_ACCENT_SOFT,
-        foreground=COLOR_ACCENT,
-        bordercolor=COLOR_ACCENT_SOFT,
-        lightcolor=COLOR_ACCENT_SOFT,
-        darkcolor=COLOR_ACCENT_SOFT,
-        focuscolor=COLOR_ACCENT_SOFT,
-    )
-    style.map(
-        "Nav.Selected.TButton",
-        background=[("pressed", COLOR_ACCENT_SOFT), ("active", COLOR_ACCENT_SOFT)],
-        foreground=[("disabled", COLOR_DISABLED), ("!disabled", COLOR_ACCENT)],
-    )
-
-    # Vstupní pole.
-    style.configure(
-        "TEntry",
-        padding=(PAD_S, PAD_S - 1),
-        fieldbackground=COLOR_SURFACE,
-        foreground=COLOR_TEXT,
-        bordercolor=COLOR_BORDER,
-        insertcolor=COLOR_TEXT,
-    )
-    style.map(
-        "TEntry",
-        fieldbackground=[("disabled", COLOR_BG), ("readonly", COLOR_BG)],
-        foreground=[("disabled", COLOR_DISABLED)],
-        bordercolor=[("focus", COLOR_ACCENT)],
-    )
-    style.configure(
-        "Chyba.TEntry",
-        padding=(PAD_S, PAD_S - 1),
-        fieldbackground=COLOR_ERROR_SOFT,
-        bordercolor=COLOR_ERROR,
-        lightcolor=COLOR_ERROR,
-        darkcolor=COLOR_ERROR,
-    )
-    style.map(
-        "Chyba.TEntry",
-        fieldbackground=[("disabled", COLOR_BG), ("!disabled", COLOR_ERROR_SOFT)],
-        bordercolor=[("!disabled", COLOR_ERROR)],
-    )
-
-    style.configure(
-        "TCombobox",
-        padding=(PAD_S, PAD_S - 1),
-        fieldbackground=COLOR_SURFACE,
-        foreground=COLOR_TEXT,
-        bordercolor=COLOR_BORDER,
-        arrowcolor=COLOR_TEXT_MUTED,
-    )
-    style.map(
-        "TCombobox",
-        fieldbackground=[("disabled", COLOR_BG), ("readonly", COLOR_SURFACE)],
-        foreground=[("disabled", COLOR_DISABLED)],
-        bordercolor=[("focus", COLOR_ACCENT)],
-    )
-    style.configure(
-        "Chyba.TCombobox",
-        padding=(PAD_S, PAD_S - 1),
-        fieldbackground=COLOR_ERROR_SOFT,
-        bordercolor=COLOR_ERROR,
-        lightcolor=COLOR_ERROR,
-        darkcolor=COLOR_ERROR,
-    )
-    style.map(
-        "Chyba.TCombobox",
-        fieldbackground=[("disabled", COLOR_BG), ("!disabled", COLOR_ERROR_SOFT)],
-        bordercolor=[("!disabled", COLOR_ERROR)],
-    )
-
-    # Rozbalovací seznam comboboxu je klasické tk okno, ne ttk.
+    # Rozbalovací seznam comboboxu je klasické tk okno, ne ttk — tady barvy platí.
     try:
         root.option_add("*TCombobox*Listbox.background", COLOR_SURFACE)
         root.option_add("*TCombobox*Listbox.foreground", COLOR_TEXT)
@@ -583,52 +545,10 @@ def _configure_styles(style: ttk.Style, root: tk.Misc) -> None:
     except tk.TclError:  # pragma: no cover - ořezaný Tk
         pass
 
-    # Tabulky.
-    style.configure(
-        "Treeview",
-        rowheight=ROW_HEIGHT,
-        background=COLOR_SURFACE,
-        fieldbackground=COLOR_SURFACE,
-        foreground=COLOR_TEXT,
-        bordercolor=COLOR_BORDER,
-        font=base,
-    )
-    style.map(
-        "Treeview",
-        background=[("selected", COLOR_ACCENT_SOFT)],
-        foreground=[("selected", COLOR_TEXT)],
-    )
-    style.configure(
-        "Treeview.Heading",
-        font=bold,
-        background=COLOR_BG,
-        foreground=COLOR_TEXT,
-        padding=(PAD_S, PAD_S),
-        relief="flat",
-    )
-    style.map("Treeview.Heading", background=[("active", COLOR_ACCENT_SOFT)])
-
-    # Posuvníky a průběh.
-    style.configure(
-        "Vertical.TScrollbar",
-        background=COLOR_BG,
-        troughcolor=COLOR_SURFACE,
-        bordercolor=COLOR_BORDER,
-        arrowcolor=COLOR_TEXT_MUTED,
-    )
-    style.configure(
-        "Horizontal.TScrollbar",
-        background=COLOR_BG,
-        troughcolor=COLOR_SURFACE,
-        bordercolor=COLOR_BORDER,
-        arrowcolor=COLOR_TEXT_MUTED,
-    )
-    style.configure(
-        "Horizontal.TProgressbar",
-        background=COLOR_ACCENT,
-        troughcolor=COLOR_BG,
-        bordercolor=COLOR_BORDER,
-    )
+    # --- tabulky -------------------------------------------------------------
+    # Vyšší řádek se čte líp; zbytek kreslí motiv.
+    style.configure("Treeview", rowheight=ROW_HEIGHT, font=base)
+    style.configure("Treeview.Heading", font=bold, padding=(PAD_S, PAD_S))
 
 
 def apply_theme(root: tk.Misc) -> ttk.Style:
@@ -643,10 +563,5 @@ def apply_theme(root: tk.Misc) -> ttk.Style:
     configure_fonts(root)
     _create_fonts(root)
     _configure_styles(style, root)
-
-    try:
-        root.configure(background=COLOR_SURFACE)  # type: ignore[call-arg]
-    except tk.TclError:  # pragma: no cover - widget bez volby background
-        pass
 
     return style

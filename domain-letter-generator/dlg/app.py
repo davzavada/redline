@@ -358,7 +358,7 @@ class ErrorDialog(tk.Toplevel):
             width=78,
             wrap="none",
             font=theme.font_name(theme.FONT_SMALL, self),
-            background=theme.COLOR_BG,
+            background=theme.system_background(self),
             foreground=theme.COLOR_TEXT,
             relief="solid",
             borderwidth=1,
@@ -496,6 +496,7 @@ class App(tk.Tk):
 
         self.title(f"{APP_NAME} {__version__}")
         theme.apply_theme(self)
+        widgets.neutralize_control_wheel(self)
         apply_icon(self)
         self.minsize(*theme.WINDOW_MIN_SIZE)
         self._restore_window_state()
@@ -515,11 +516,11 @@ class App(tk.Tk):
     # stavba rozhraní
     # ------------------------------------------------------------------
     def _build_layout(self) -> None:
-        self.configure(background=theme.COLOR_BG)
+        # Podklad okna kreslí systémový motiv — aplikace si žádnou barvu nevnucuje.
         self.columnconfigure(1, weight=1)
         self.rowconfigure(0, weight=1)
 
-        self.nav = ttk.Frame(self, style="Nav.TFrame", padding=(theme.PAD_M, theme.PAD_M))
+        self.nav = ttk.Frame(self, padding=(theme.PAD_M, theme.PAD_M))
         self.nav.grid(row=0, column=0, sticky="ns")
 
         ttk.Label(self.nav, style="Nav.TLabel", text=APP_NAME.upper()).pack(
@@ -550,7 +551,15 @@ class App(tk.Tk):
         self.status_bar.grid(row=1, column=0, columnspan=2, sticky="ew")
 
     def _bind_shortcuts(self) -> None:
-        """Klávesové zkratky platí v celém okně, i když je kurzor ve formuláři."""
+        """Klávesové zkratky platí v celém okně, i když je kurzor ve formuláři.
+
+        Váže se na **okno**, ne přes ``bind_all``. Značku ``all`` totiž nese
+        každý widget aplikace včetně widgetů v modálních dialozích, takže by
+        Ctrl+Q stisknuté v poli „Název šablony“ zavřelo celou aplikaci
+        i s rozdělanou prací — modální ``grab_set()`` proti tomu nechrání.
+        Značku toplevelu naproti tomu nesou jen jeho vlastní potomci, takže
+        zkratky fungují v celém hlavním okně a v dialozích mlčí.
+        """
 
         bindings: tuple[tuple[tuple[str, ...], Callable[[Any], Any]], ...] = (
             (("<Control-g>", "<Control-G>"), self._shortcut_generate),
@@ -560,7 +569,7 @@ class App(tk.Tk):
         )
         for sequences, handler in bindings:
             for sequence in sequences:
-                self.bind_all(sequence, handler, add="+")
+                self.bind(sequence, handler, add="+")
 
     # ------------------------------------------------------------------
     # nastavení
@@ -735,6 +744,8 @@ class App(tk.Tk):
                 settings_getter=self.settings,
                 status=self.status_bar,
             )
+            # Volbu „uložit i PDF“ si pohled přepíná sám — ať se hned uloží.
+            view.on_settings_changed = self.save_settings
             view.on_generated = self._on_generated
             return view
         if key == NAV_SETTINGS:
