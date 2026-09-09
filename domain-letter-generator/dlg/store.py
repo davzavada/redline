@@ -16,12 +16,9 @@ Rozvržení dat::
 
 from __future__ import annotations
 
-import hashlib
 import io
 import re
-import shutil
 import unicodedata
-import zipfile
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -114,6 +111,7 @@ def make_template_id(name: str, content: bytes | None = None, *, salt: str = "")
     dá vždy totéž id, takže je funkce testovatelná bez času a náhody.
     ``salt`` slouží k rozlišení kolizí (viz :meth:`TemplateStore.import_docx`).
     """
+    import hashlib
 
     digest = hashlib.sha1()
     digest.update(str(name or "").strip().encode("utf-8"))
@@ -136,6 +134,7 @@ def _sort_key(meta: TemplateMeta) -> tuple[str, str]:
 
 def _check_docx(data: bytes, source_name: str) -> None:
     """Ověří, že jde opravdu o .docx (ZIP obsahující ``word/document.xml``)."""
+    import zipfile
 
     label = source_name or "soubor"
     if not data:
@@ -449,6 +448,7 @@ class TemplateStore:
 
     def _write_scan_snapshot(self, template_id: str, scan: ScanResult) -> None:
         """Uloží snímek analýzy i otisk souboru — podklad pro ``verify_mapping``."""
+        import hashlib
 
         try:
             data = self.docx_path(template_id).read_bytes()
@@ -474,6 +474,7 @@ class TemplateStore:
         zapsala do špatné pasáže. Proto se vedle mapování drží snímek analýzy
         a porovnává se s aktuálním stavem souboru.
         """
+        import hashlib
 
         snapshot = read_json(self.scan_path(meta.id), default=None, strict=False)
         try:
@@ -697,6 +698,7 @@ class TemplateStore:
         return meta
 
     def delete(self, template_id: str) -> None:
+        import shutil
         directory = self.template_dir(template_id)
         if not directory.is_dir():
             raise TemplateNotFound(f"Šablona „{template_id}“ nebyla nalezena.")
@@ -710,6 +712,7 @@ class TemplateStore:
 
     @staticmethod
     def _remove_dir(directory: Path) -> None:
+        import shutil
         try:
             shutil.rmtree(directory)
         except OSError:

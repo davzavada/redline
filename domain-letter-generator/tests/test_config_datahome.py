@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import shutil
 from pathlib import Path
 
 import pytest
@@ -240,16 +241,14 @@ def test_selhany_presun_vrati_uz_prestehovane_zpet(tmp_path, monkeypatch):
     _pripravit_data(puvodni)
     cil = tmp_path / "D" / "Dopisy"
 
-    import shutil as _shutil
-
-    puvodni_move = config.shutil.move
+    puvodni_move = shutil.move
 
     def rozbity_move(src, dst):
         if Path(src).name == "settings.json" and Path(dst).parent == cil:
             raise PermissionError(13, "Permission denied")
         return puvodni_move(src, dst)
 
-    monkeypatch.setattr(config.shutil, "move", rozbity_move)
+    monkeypatch.setattr(shutil, "move", rozbity_move)
 
     with pytest.raises(config.ConfigError) as chyba:
         config.set_app_home(cil, move_existing=True)
@@ -260,7 +259,6 @@ def test_selhany_presun_vrati_uz_prestehovane_zpet(tmp_path, monkeypatch):
     assert not config.location_path().exists()
     assert config.data_home_status().source == "default"
     assert config.app_home() == puvodni
-    del _shutil
 
 
 def test_selhany_rollback_vyjmenuje_co_zustalo(tmp_path, monkeypatch):
@@ -268,7 +266,7 @@ def test_selhany_rollback_vyjmenuje_co_zustalo(tmp_path, monkeypatch):
     _pripravit_data(puvodni)
     cil = tmp_path / "D" / "Dopisy"
 
-    puvodni_move = config.shutil.move
+    puvodni_move = shutil.move
 
     def rozbity_move(src, dst):
         if Path(src).name == "settings.json" and Path(dst).parent == cil:
@@ -277,7 +275,7 @@ def test_selhany_rollback_vyjmenuje_co_zustalo(tmp_path, monkeypatch):
             raise PermissionError(13, "Permission denied")  # rollback neprojde
         return puvodni_move(src, dst)
 
-    monkeypatch.setattr(config.shutil, "move", rozbity_move)
+    monkeypatch.setattr(shutil, "move", rozbity_move)
 
     with pytest.raises(config.ConfigError) as chyba:
         config.set_app_home(cil, move_existing=True)

@@ -117,14 +117,17 @@ if not exist "assets\app.ico" (
 )
 
 rem --- 5) build --------------------------------------------------------------
-echo [4/5] Sestavuji GeneratorDopisu.exe ^(jeden soubor^) ...
-set "DLG_BUILD_MODE=onefile"
-"%VPY%" -m PyInstaller --noconfirm --clean --workpath "build\onefile" --distpath "dist" "DomainLetterGenerator.spec"
+rem  Poradi je zamerne: nejdriv varianta ve slozce, protoze je to ta, kterou
+rem  ma uzivatel spoustet. Jednosouborova varianta pri kazdem spusteni rozbaluje
+rem  cely obsah .exe do %TEMP% a ceka na antivirus - proto startuje pomalu.
+echo [4/5] Sestavuji doporucenou variantu ve slozce ^(onedir^) ...
+set "DLG_BUILD_MODE=onedir"
+"%VPY%" -m PyInstaller --noconfirm --clean --workpath "build\onedir" --distpath "dist" "DomainLetterGenerator.spec"
 if errorlevel 1 goto :build_failed
 
-echo [5/5] Sestavuji zalozni variantu ve slozce ^(onedir^) ...
-set "DLG_BUILD_MODE=onedir"
-"%VPY%" -m PyInstaller --noconfirm --workpath "build\onedir" --distpath "dist" "DomainLetterGenerator.spec"
+echo [5/5] Sestavuji zalozni variantu ^(jeden soubor, na flashku^) ...
+set "DLG_BUILD_MODE=onefile"
+"%VPY%" -m PyInstaller --noconfirm --workpath "build\onefile" --distpath "dist" "DomainLetterGenerator.spec"
 if errorlevel 1 goto :build_failed
 
 set "DLG_BUILD_MODE="
@@ -134,12 +137,13 @@ echo ===========================================================
 echo  Hotovo.
 echo ===========================================================
 echo.
-echo   dist\GeneratorDopisu.exe
-echo       jeden soubor, staci zkopirovat na plochu nebo na flashku
-echo.
 echo   dist\GeneratorDopisu-onedir\GeneratorDopisu.exe
-echo       zalozni varianta - cela slozka; pouzijte ji, kdyby jeden
-echo       soubor blokoval antivirus
+echo       TOHLE POUZIVEJTE. Cela slozka; program nastartuje hned.
+echo       Zkopirujte celou slozku a udelejte si zastupce na .exe uvnitr.
+echo.
+echo   dist\GeneratorDopisu.exe
+echo       jeden soubor - hodi se na flashku, ale startuje o dost pomaleji:
+echo       pri kazdem spusteni se cely rozbali do docasne slozky.
 echo.
 dir /b "dist"
 echo.

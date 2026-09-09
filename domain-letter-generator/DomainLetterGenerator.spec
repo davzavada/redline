@@ -1,21 +1,29 @@
 # -*- mode: python ; coding: utf-8 -*-
-"""PyInstaller spec pro „Generátor dopisů“.
+r"""PyInstaller spec pro „Generátor dopisů“.
 
 Jedním souborem se dají postavit dvě varianty; přepíná se proměnnou prostředí
 ``DLG_BUILD_MODE``:
 
-* ``onefile`` (výchozí) — jeden samostatný ``dist/GeneratorDopisu.exe``.
-* ``onedir``            — složka ``dist/GeneratorDopisu-onedir/`` s ``GeneratorDopisu.exe``
-                          vedle knihoven. Startuje rychleji a antiviry ji hlásí
-                          jako podezřelou podstatně méně často.
+* ``onedir`` (VÝCHOZÍ, doporučené) — složka ``dist/GeneratorDopisu-onedir/``
+                          s ``GeneratorDopisu.exe`` vedle knihoven.
+* ``onefile``           — jeden samostatný ``dist/GeneratorDopisu.exe``.
+
+**Proč je výchozí onedir.** Jednosouborová varianta při KAŽDÉM spuštění rozbalí
+celý obsah .exe (Python, Tcl/Tk, stovky souborů) do ``%TEMP%\_MEIxxxxx``, spustí
+se z něj a po skončení ho zase smaže. Na Windows to obvykle znamená vteřiny
+čekání — a hlavně to čeká na antivirus, který každý rozbalený soubor kontroluje.
+Varianta ve složce má soubory rovnou na disku, takže odpadá celé rozbalování.
+Samotná aplikace nastartuje do ~0,2 s; všechno ostatní byl tenhle rozbalovací
+krok. Jeden soubor se pořád staví — hodí se na flashku — ale není to to, co má
+uživatel spouštět denně.
 
 Obě varianty se stavějí dvěma samostatnými běhy PyInstalleru (viz ``build.bat``
 nebo workflow ``.github/workflows/domain-letter-generator.yml``), aby si
 nešlapaly po mezivýsledcích v ``build/``::
 
-    pyinstaller --noconfirm --workpath build/onefile --distpath dist DomainLetterGenerator.spec
-    set DLG_BUILD_MODE=onedir
     pyinstaller --noconfirm --workpath build/onedir  --distpath dist DomainLetterGenerator.spec
+    set DLG_BUILD_MODE=onefile
+    pyinstaller --noconfirm --workpath build/onefile --distpath dist DomainLetterGenerator.spec
 
 Aplikace nemá žádné runtime závislosti třetích stran — do balíčku jde jen
 standardní knihovna Pythonu (včetně tkinter) a balík ``dlg``.
@@ -33,7 +41,7 @@ APP_NAME = "GeneratorDopisu"          # název .exe (ASCII — kvůli cestám a 
 PRODUCT_NAME = "Generátor dopisů"     # název pro uživatele (vlastnosti souboru)
 ICON_PATH = os.path.join(PROJECT_DIR, "assets", "app.ico")
 
-BUILD_MODE = os.environ.get("DLG_BUILD_MODE", "onefile").strip().lower() or "onefile"
+BUILD_MODE = os.environ.get("DLG_BUILD_MODE", "onedir").strip().lower() or "onedir"
 if BUILD_MODE not in ("onefile", "onedir"):
     raise SystemExit(
         f"Neznámý režim buildu DLG_BUILD_MODE={BUILD_MODE!r}. "
@@ -195,6 +203,14 @@ def _dlg_modules() -> list:
 
 # Věci, které do dopisového generátoru nepatří. Vývojové závislosti
 # (pytest, python-docx a jeho lxml) se do .exe nesmí dostat ani omylem.
+#
+# Kromě nich se vyhazují i části standardní knihovny, které aplikace nepoužívá.
+# Balík ``dlg`` si vystačí s: contextlib, ctypes, dataclasses, datetime, errno,
+# hashlib, inspect, io, json, os, pathlib, queue, re, shutil, subprocess, sys,
+# tempfile, threading, tkinter, traceback, typing, unicodedata, xml, zipfile.
+# Že se aplikace bez vyloučených modulů opravdu obejde, hlídá test
+# ``tests/test_baleni.py`` — projde celý průchod aplikací s těmito moduly
+# zablokovanými, takže se na to nemusí spoléhat na dobré slovo.
 EXCLUDES = [
     "IPython",
     "PIL",
@@ -217,6 +233,31 @@ EXCLUDES = [
     "setuptools",
     "wheel",
     "wx",
+    # --- nepoužívané části standardní knihovny -----------------------------
+    "asyncio",
+    "curses",
+    "distutils",
+    "doctest",
+    "email",
+    "ftplib",
+    "html",
+    "http",
+    "idlelib",
+    "imaplib",
+    "lib2to3",
+    "multiprocessing",
+    "pdb",
+    "poplib",
+    "pydoc",
+    "pydoc_data",
+    "smtplib",
+    "socketserver",
+    "sqlite3",
+    "test",
+    "turtle",
+    "unittest",
+    "wsgiref",
+    "xmlrpc",
 ]
 
 a = Analysis(
@@ -232,6 +273,43 @@ a = Analysis(
     excludes=EXCLUDES,
     noarchive=False,
 )
+
+
+# --- odlehčení balíčku --------------------------------------------------------
+
+# Balast, který si Tcl/Tk nese s sebou a tkinter aplikace ho nepoužije.
+# Nejde ani tak o megabajty jako o POČET SOUBORŮ: `tzdata` je přes 700 drobných
+# souborů s časovými pásmy pro tclovský příkaz `clock`. Aplikace pracuje s daty
+# přes `datetime` z Pythonu, takže je nepotřebuje — zato je jednosouborová
+# varianta při každém spuštění rozbaluje na disk a antivirus je jeden po druhém
+# kontroluje. Právě tenhle krok stojí ty vteřiny při startu.
+DATA_BALAST = (
+    "tzdata",   # databáze časových pásem pro tclovský `clock`
+    "demos",    # ukázkové skripty Tk
+    "images",   # obrázky k ukázkám
+)
+
+
+def _je_balast(dest: str) -> bool:
+    """Leží položka v některé ze zbytných složek Tcl/Tk?"""
+
+    parts = str(dest).replace("\\", "/").split("/")
+    if not parts or not parts[0].strip("_").startswith(("tcl", "tk")):
+        return False
+    return any(part in DATA_BALAST for part in parts[1:])
+
+
+def _odlehci(analysis) -> None:
+    """Vyhodí z balíčku zbytná data Tcl/Tk a řekne, kolik souborů to ušetřilo."""
+
+    puvodne = len(analysis.datas)
+    analysis.datas = [entry for entry in analysis.datas if not _je_balast(entry[0])]
+    ubylo = puvodne - len(analysis.datas)
+    print(
+        f"[dlg] balast Tcl/Tk: vyhozeno {ubylo} souborů "
+        f"({puvodne} -> {len(analysis.datas)} datových položek)",
+        file=sys.stderr,
+    )
 
 
 def _collected_names(entries):
@@ -265,6 +343,7 @@ def _assert_tkinter_bundled(analysis) -> None:
 
 
 _assert_tkinter_bundled(a)
+_odlehci(a)
 
 pyz = PYZ(a.pure)
 
