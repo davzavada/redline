@@ -9,6 +9,7 @@ Bez displeje se celý soubor přeskočí (fixture ``root`` zavolá ``pytest.skip
 
 from __future__ import annotations
 
+import gc
 import os
 import subprocess
 import sys
@@ -51,6 +52,12 @@ def root():
             window.destroy()
         except tk.TclError:  # pragma: no cover
             pass
+        # Tk interpret se musí uvolnit dřív, než se postaví další. Bez toho se
+        # instance hromadí a sběr odpadu pak padne doprostřed startu vlákna
+        # v run_in_thread (Fatal Python error: Aborted). Stejně to dělá
+        # tests/test_app.py:close_app.
+        del window
+        gc.collect()
 
 
 def _pump(window: tk.Misc, predicate, timeout: float = 5.0) -> bool:
@@ -247,6 +254,41 @@ def test_scrollable_frame_sirka_a_scrollregion(root: tk.Tk) -> None:
 )
 def test_wheel_units(udalost, ocekavano) -> None:
     assert W._wheel_units(udalost) == ocekavano
+
+
+def test_skutecne_kolecko_projde_celym_retezcem(root: tk.Tk) -> None:
+    """Nejdůležitější test kolečka: událost vyrábí Tk, ne my.
+
+    Ostatní testy volají obsluhu s vlastní ``SimpleNamespace``, tedy s událostí,
+    která se chová hezčeji než skutečná — právě tím původní pád proklouzl až
+    k uživateli. Skutečné ``<MouseWheel>`` má ``num == "??"`` i na Linuxu
+    (ověřeno), takže tenhle test hlídá regresi i v CI.
+
+    Výjimka z obsluhy Tk nepropadne ven — skončí v ``report_callback_exception``.
+    Test si ho proto přebere sám, jinak by pád nepoznal.
+    """
+
+    chyby: list[BaseException] = []
+    root.report_callback_exception = (  # type: ignore[assignment]
+        lambda exc, val, tb: chyby.append(val)
+    )
+
+    ramec = W.ScrollableFrame(root)
+    ramec.pack(fill="both", expand=True)
+    for i in range(80):
+        ttk.Label(ramec.body, text=f"položka {i}").pack(anchor="w")
+    root.update()
+
+    root.event_generate(
+        "<MouseWheel>",
+        delta=-120,
+        rootx=ramec.canvas.winfo_rootx() + 20,
+        rooty=ramec.canvas.winfo_rooty() + 20,
+    )
+    root.update()
+
+    assert not chyby, f"obsluha kolečka spadla: {chyby!r}"
+    assert ramec.canvas.yview()[0] > 0.0, "kolečko plochu neodrolovalo"
 
 
 def test_event_int_snese_neposlusna_pole() -> None:

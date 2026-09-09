@@ -290,14 +290,3 @@ class FillReport:
         }
 
 
-def merge_values(
-    fields: Sequence[FieldSpec], values: Mapping[str, str]
-) -> dict[str, str]:
-    """Z hodnot podle klíče pole udělá hodnoty podle id placeholderu."""
-
-    out: dict[str, str] = {}
-    for spec in fields:
-        value = values.get(spec.key, spec.default)
-        for pid in spec.placeholder_ids:
-            out[pid] = value
-    return out

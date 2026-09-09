@@ -12,6 +12,7 @@ data uživatele.
 
 from __future__ import annotations
 
+import gc
 import time
 import zipfile
 from pathlib import Path
@@ -119,6 +120,12 @@ def root():
             window.destroy()
         except tk.TclError:  # pragma: no cover
             pass
+        # Tk interpret se musí uvolnit dřív, než se postaví další. Bez toho se
+        # instance hromadí a sběr odpadu pak padne doprostřed startu vlákna
+        # v run_in_thread (Fatal Python error: Aborted). Stejně to dělá
+        # tests/test_app.py:close_app.
+        del window
+        gc.collect()
 
 
 @pytest.fixture(autouse=True)
@@ -1184,3 +1191,125 @@ def test_generate_view_starsi_nahled_neprepise_novejsi(
     assert _pump(root, lambda: "Druha-hodnota" in view.preview_text())
     root.update()
     assert "Prvni-hodnota" not in view.preview_text()
+
+
+# ---------------------------------------------------------------------------
+# volba „uložit i PDF“
+# ---------------------------------------------------------------------------
+@pytest.fixture()
+def s_prevodnikem(monkeypatch: pytest.MonkeyPatch):
+    """Předstírá, že je na počítači čím převádět do PDF.
+
+    Vrací dvojici ``(modul, podstrč)``. Podstrkovat převod se MUSÍ přes
+    ``monkeypatch``, ne přiřazením do modulu — jinak náhrada přežije test
+    a ovlivní všechno, co běží po něm.
+    """
+
+    from dlg import pdf
+
+    monkeypatch.setattr(pdf, "converter_name", lambda: "LibreOffice")
+    monkeypatch.setattr(pdf, "find_converter", lambda: ("soffice", "/usr/bin/soffice"))
+
+    def podstrc(funkce):
+        monkeypatch.setattr(pdf, "convert", funkce)
+
+    return pdf, podstrc
+
+
+def test_volba_pdf_se_nenabizi_bez_prevodniku(
+    root: tk.Tk, store: TemplateStore, history: ValueHistory,
+    settings: config.Settings, template_id: str, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Nabídnout volbu a pak selhat je horší než ji neukázat."""
+
+    from dlg import pdf
+
+    monkeypatch.setattr(pdf, "converter_name", lambda: "")
+    view = _generate_view(root, store, history, settings)
+    assert view.load(template_id)
+    root.update()
+
+    assert view.pdf_check is None
+    assert view.wants_pdf() is False
+
+
+def test_volba_pdf_se_pamatuje(
+    root: tk.Tk, store: TemplateStore, history: ValueHistory,
+    settings: config.Settings, template_id: str, s_prevodnikem,
+) -> None:
+    ulozeno: list[Any] = []
+    view = _generate_view(root, store, history, settings)
+    view.on_settings_changed = ulozeno.append
+    assert view.load(template_id)
+    root.update()
+
+    assert view.pdf_check is not None, "s dostupným převodníkem se volba nabídnout má"
+    assert view.wants_pdf() is False
+
+    view.pdf_var.set(True)
+    view._on_pdf_toggled()
+    assert view.wants_pdf() is True
+    assert settings.export_pdf is True
+    assert ulozeno == [settings], "změna volby se má rovnou uložit do nastavení"
+
+
+def test_generovani_s_pdf_ulozi_oba_soubory(
+    root: tk.Tk, store: TemplateStore, history: ValueHistory,
+    settings: config.Settings, template_id: str, s_prevodnikem, tmp_path: Path,
+) -> None:
+    prevedeno: list[Path] = []
+
+    def falesny_convert(docx_path, pdf_path=None, **kwargs):
+        cesta = Path(docx_path).with_suffix(".pdf")
+        cesta.write_bytes(b"%PDF-1.7\n")
+        prevedeno.append(Path(docx_path))
+        return cesta
+
+    modul, podstrc = s_prevodnikem
+    podstrc(falesny_convert)
+
+    view = _generate_view(root, store, history, settings)
+    assert view.load(template_id)
+    _fill_everything(view)
+    view.pdf_var.set(True)
+    root.update()
+
+    assert view.generate() is True
+    assert _pump(root, lambda: view.last_output_path is not None)
+
+    dopis = view.last_output_path
+    assert dopis is not None and dopis.is_file()
+    assert prevedeno == [dopis]
+    assert view.last_pdf_path is not None
+    assert view.last_pdf_path.read_bytes().startswith(b"%PDF")
+    assert view.last_pdf_path.stem == dopis.stem
+
+
+def test_selhany_pdf_dopis_neshodi(
+    root: tk.Tk, store: TemplateStore, history: ValueHistory,
+    settings: config.Settings, template_id: str, s_prevodnikem,
+    bez_dialogu: dict[str, list[Any]],
+) -> None:
+    """PDF je nadstavba: když se nepovede, dopis .docx musí zůstat uložený."""
+
+    pdf_modul, podstrc = s_prevodnikem
+
+    def rozbity_convert(docx_path, pdf_path=None, **kwargs):
+        raise pdf_modul.PdfError("PDF se nepodařilo vytvořit — Word převod nedokončil.")
+
+    podstrc(rozbity_convert)
+
+    view = _generate_view(root, store, history, settings)
+    assert view.load(template_id)
+    _fill_everything(view)
+    view.pdf_var.set(True)
+    root.update()
+
+    assert view.generate() is True
+    assert _pump(root, lambda: view.last_output_path is not None)
+
+    assert view.last_output_path is not None and view.last_output_path.is_file()
+    assert view.last_pdf_path is None
+    hlasky = " ".join(bez_dialogu["warning"])
+    assert "PDF se nepodařilo vytvořit" in hlasky, "uživateli se má říct, proč PDF není"
+
