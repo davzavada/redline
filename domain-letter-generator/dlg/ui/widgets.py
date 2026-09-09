@@ -445,15 +445,20 @@ class ScrollableFrame(ttk.Frame):
         except (tk.TclError, KeyError, TypeError, ValueError):  # pragma: no cover
             return None
 
+    def _is_inside(self, widget: Any) -> bool:
+        """Leží widget uvnitř téhle plochy?"""
+
+        node = widget
+        while node is not None:
+            if node is self:
+                return True
+            node = getattr(node, "master", None)
+        return False
+
     def pointer_inside(self, event: Any) -> bool:
         """Je ukazatel myši nad touhle plochou (včetně vnořených widgetů)?"""
 
-        widget: Any = self._containing(event)
-        while widget is not None:
-            if widget is self:
-                return True
-            widget = getattr(widget, "master", None)
-        return False
+        return self._is_inside(self._containing(event))
 
     def _consumed_by_inner(self, widget: Any) -> bool:
         """Rolovalo si kolečko už nějaké vnořené okno (Text, tabulka, seznam)?
@@ -483,10 +488,7 @@ class ScrollableFrame(ttk.Frame):
         if self._destroyed:
             return False
         widget: Any = self._containing(event)
-        node = widget
-        while node is not None and node is not self:
-            node = getattr(node, "master", None)
-        if node is not self:  # myš je jinde
+        if not self._is_inside(widget):
             return False
         if self._consumed_by_inner(widget):
             return False
