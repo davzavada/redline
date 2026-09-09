@@ -38,6 +38,18 @@ formulář a výsledkem je nový soubor `.docx` bez zvýraznění a bez zbytků.
 
 Šablona v knihovně zůstává pořád stejná, dá se použít znovu a znovu.
 
+### Uložit rovnou i PDF
+
+V patičce pohledu *Generovat* je volba **Uložit vedle dopisu i PDF**. Program
+si PDF nevyrábí sám — nechá ho udělat Word, který na počítači stejně máte
+(přes jeho vlastní „Uložit jako → PDF“), takže výsledek vypadá přesně tak, jak
+dopis vidíte ve Wordu: hlavičkový papír, fonty, zarovnání i číslování sedí.
+Když Word není, zkusí se LibreOffice; když není ani ten, volba se vůbec
+nenabídne.
+
+Dopis `.docx` se ukládá vždycky — když se převod nepovede, program to řekne
+a hotový dopis zůstane, jak byl.
+
 ---
 
 ## Jak si vyrobit šablonu
@@ -85,26 +97,32 @@ nerozpadne na kusy. Rozdělí se jen to, co má kolem lomítka mezery.
 ## Instalace
 
 1. Otevřete stránku **Releases** projektu na GitHubu.
-2. Stáhněte soubor **`GeneratorDopisu.exe`**.
-3. Uložte si ho, kam chcete — na plochu, do Dokumentů, na flashku.
-4. Spusťte dvojklikem.
+2. Stáhněte **`GeneratorDopisu-onedir.zip`**.
+3. Rozbalte celou složku, kam chcete — na plochu, do Dokumentů, na flashku.
+4. Spusťte `GeneratorDopisu.exe` uvnitř ní (a udělejte si na něj zástupce).
 
 To je celé. Nic se neinstaluje, nic se nezapisuje do registru, program
 nepotřebuje práva správce ani povolení IT oddělení. Odinstaluje se smazáním
-souboru.
+složky.
+
+### Proč složka, a ne jeden soubor
+
+U každého vydání je i **`GeneratorDopisu.exe`** — celý program v jediném
+souboru. Hodí se na flashku, ale **startuje výrazně pomaleji**: při každém
+spuštění se celý svůj obsah (Python, Tcl/Tk, stovky souborů) rozbalí do dočasné
+složky, teprve pak se program spustí a po zavření se to zase smaže. Čeká se
+přitom hlavně na antivirus, který každý rozbalený soubor kontroluje. Ze stejného
+důvodu u jednosouborové varianty častěji vyskočí falešný poplach — je to typický
+vzor, který používají i některé škodlivé programy.
+
+Varianta ve složce má soubory rovnou na disku, takže tenhle krok odpadá úplně
+a okno naskočí prakticky okamžitě.
 
 ### Kdyby si stěžoval antivirus
 
 Program není podepsaný certifikátem (ten stojí několik tisíc korun ročně),
 takže ho Windows SmartScreen může napoprvé označit za neznámou aplikaci:
 klepněte na *Další informace → Přesto spustit*.
-
-Antiviry občas hlásí falešný poplach u programů zabalených do jediného souboru
-— je to typický vzor, který používají i některé škodlivé programy. Proto je
-u každého vydání i **`GeneratorDopisu-onedir.zip`**: rozbalte celou složku
-a spouštějte `GeneratorDopisu.exe` uvnitř ní. Tahle varianta prochází
-antivirovou kontrolou podstatně častěji a navíc startuje rychleji. Jediný
-rozdíl je, že se musí kopírovat celá složka, ne jeden soubor.
 
 ---
 
@@ -182,18 +200,17 @@ Skript si vytvoří `.venv`, doinstaluje do něj PyInstaller a postaví obě
 varianty. Výsledek:
 
 ```
-dist\GeneratorDopisu.exe                          jeden soubor
-dist\GeneratorDopisu-onedir\GeneratorDopisu.exe   varianta ve složce
+dist\GeneratorDopisu-onedir\GeneratorDopisu.exe   varianta ve složce (tuhle používejte)
+dist\GeneratorDopisu.exe                          jeden soubor (na flashku)
 ```
 
 Ručně se totéž dělá dvěma běhy PyInstalleru nad jedním spec souborem — varianta
-se přepíná proměnnou prostředí `DLG_BUILD_MODE`:
+se přepíná proměnnou prostředí `DLG_BUILD_MODE` (bez ní se staví `onedir`):
 
 ```
+python -m PyInstaller --noconfirm --workpath build\onedir  --distpath dist DomainLetterGenerator.spec
 set DLG_BUILD_MODE=onefile
 python -m PyInstaller --noconfirm --workpath build\onefile --distpath dist DomainLetterGenerator.spec
-set DLG_BUILD_MODE=onedir
-python -m PyInstaller --noconfirm --workpath build\onedir  --distpath dist DomainLetterGenerator.spec
 ```
 
 ### Ikona

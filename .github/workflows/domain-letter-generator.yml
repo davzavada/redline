@@ -21,7 +21,8 @@ on:
         default: false
   push:
     branches:
-      - claude/domain-letter-generator-62qkrm
+      - main
+      - 'claude/**'
     # Pozor: `paths` se u pushnutých tagů nevyhodnocuje, tagy dlg-v* proto
     # workflow spustí vždy (což je záměr — z tagu se dělá release).
     paths:
@@ -160,15 +161,18 @@ jobs:
       - name: Kontrola ikony assets/app.ico
         run: python tools/make_icon.py --check
 
-      - name: Build — jeden soubor (onefile)
-        env:
-          DLG_BUILD_MODE: onefile
-        run: python -m PyInstaller --noconfirm --clean --workpath build/onefile --distpath dist DomainLetterGenerator.spec
-
-      - name: Build — složka (onedir, záchranná varianta)
+      # Pořadí je záměrné: onedir je varianta, kterou má uživatel spouštět.
+      # Onefile při každém startu rozbaluje celý obsah .exe do %TEMP% a čeká
+      # na antivirus — proto startuje o vteřiny pomaleji.
+      - name: Build — složka (onedir, doporučená varianta)
         env:
           DLG_BUILD_MODE: onedir
-        run: python -m PyInstaller --noconfirm --workpath build/onedir --distpath dist DomainLetterGenerator.spec
+        run: python -m PyInstaller --noconfirm --clean --workpath build/onedir --distpath dist DomainLetterGenerator.spec
+
+      - name: Build — jeden soubor (onefile, na flashku)
+        env:
+          DLG_BUILD_MODE: onefile
+        run: python -m PyInstaller --noconfirm --workpath build/onefile --distpath dist DomainLetterGenerator.spec
 
       - name: Kontrola výsledku
         shell: pwsh
@@ -243,11 +247,13 @@ jobs:
 
           **Co stáhnout**
 
-          * \`GeneratorDopisu.exe\` — jeden soubor. Stáhnout, spustit, hotovo.
-            Nic se neinstaluje a nepotřebuje práva správce.
-          * \`GeneratorDopisu-onedir.zip\` — záchranná varianta. Rozbalte celou
-            složku a spouštějte \`GeneratorDopisu.exe\` uvnitř ní. Použijte ji,
-            kdyby jeden soubor blokoval antivirus.
+          * \`GeneratorDopisu-onedir.zip\` — **tohle použijte.** Rozbalte celou
+            složku a spouštějte \`GeneratorDopisu.exe\` uvnitř ní. Nic se
+            neinstaluje a nepotřebuje práva správce. Program naskočí hned.
+          * \`GeneratorDopisu.exe\` — celý program v jednom souboru, hodí se na
+            flashku. Startuje ale o dost pomaleji: při každém spuštění se celý
+            rozbalí do dočasné složky a čeká na antivirovou kontrolu. Ze
+            stejného důvodu u něj antivirus častěji hlásí falešný poplach.
 
           **Kam se ukládají data**
 
@@ -257,8 +263,8 @@ jobs:
           **Poznámka k antiviru**
 
           Aplikace není podepsaná certifikátem, takže ji SmartScreen nebo
-          antivirus může napoprvé označit za neznámou. U jednosouborové varianty
-          se to stává častěji — proto je k dispozici i varianta ve složce.
+          antivirus může napoprvé označit za neznámou: *Další informace →
+          Přesto spustit*.
           EOF
           cat release/notes.md
 
