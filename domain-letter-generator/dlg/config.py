@@ -7,9 +7,16 @@ výhradně do profilu uživatele.
 
 Pořadí, ve kterém se hledá domovský adresář aplikace:
 
-1. proměnná prostředí ``DLG_HOME`` (přenosný režim, testy),
-2. ``%LOCALAPPDATA%\\DomainLetterGenerator`` na Windows,
-3. ``~/.local/share/domain-letter-generator`` jinde.
+1. proměnná prostředí ``DLG_HOME`` (testy, dočasné přesměrování),
+2. přenosný režim — soubor ``portable.txt`` vedle ``.exe`` (data na flash disku),
+3. složka zvolená uživatelem v Nastavení,
+4. ``%LOCALAPPDATA%\\DomainLetterGenerator`` na Windows,
+   ``~/.local/share/domain-letter-generator`` jinde.
+
+Ukazatel na ručně zvolenou složku leží ZÁMĚRNĚ mimo ni — v
+``%APPDATA%\\DomainLetterGenerator\\location.json`` (resp.
+``~/.config/domain-letter-generator/location.json``). Kdyby byl uvnitř,
+aplikace by po přesunu složky svá data už nenašla.
 """
 
 from __future__ import annotations
@@ -17,6 +24,8 @@ from __future__ import annotations
 import errno
 import json
 import os
+import shutil
+import sys
 import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -26,16 +35,26 @@ from .version import APP_ID, APP_NAME
 
 __all__ = [
     "ConfigError",
+    "DataHomeStatus",
     "Settings",
+    "anchor_dir",
     "app_home",
+    "data_home_status",
+    "default_app_home",
     "default_output_dir",
+    "has_data",
     "history_path",
     "load_settings",
+    "location_path",
+    "portable_data_dir",
     "read_json",
+    "read_location",
     "save_settings",
+    "set_app_home",
     "settings_path",
     "templates_dir",
     "write_json_atomic",
+    "write_location",
 ]
 
 #: Proměnná prostředí, která přebíjí umístění dat aplikace.
@@ -51,6 +70,22 @@ OUTPUT_DIR_NAME = APP_NAME
 TEMPLATES_DIR_NAME = "templates"
 SETTINGS_FILE_NAME = "settings.json"
 HISTORY_FILE_NAME = "history.json"
+
+#: Soubor s ukazatelem na složku, kterou si uživatel zvolil pro svá data.
+#: Leží ZÁMĚRNĚ mimo tuto složku — jinak by ji po přesunu nešlo najít.
+LOCATION_FILE_NAME = "location.json"
+
+#: Soubor vedle ``.exe``, který zapíná přenosný režim (data u programu).
+PORTABLE_MARKER_NAME = "portable.txt"
+#: Podsložka s daty v přenosném režimu, když marker neurčí jinou cestu.
+PORTABLE_DATA_DIR_NAME = "data"
+
+#: Položky, které tvoří data aplikace — jen ty se při změně složky stěhují.
+DATA_ENTRIES: tuple[str, ...] = (
+    TEMPLATES_DIR_NAME,
+    SETTINGS_FILE_NAME,
+    HISTORY_FILE_NAME,
+)
 
 
 class ConfigError(Exception):
@@ -90,12 +125,8 @@ def _describe_os_error(exc: OSError) -> str:
     return str(strerror) if strerror else str(exc)
 
 
-def app_home() -> Path:
-    """Adresář s daty aplikace (šablony, nastavení, historie)."""
-
-    override = os.environ.get(ENV_HOME, "").strip()
-    if override:
-        return _as_path(override)
+def default_app_home() -> Path:
+    """Výchozí umístění dat, dokud si uživatel nezvolí jiné."""
 
     if _is_windows():
         local = os.environ.get("LOCALAPPDATA", "").strip()
@@ -103,6 +134,281 @@ def app_home() -> Path:
         return base / APP_ID
 
     return Path.home() / ".local" / "share" / POSIX_DIR_NAME
+
+
+def app_home() -> Path:
+    """Adresář s daty aplikace (šablony, nastavení, historie).
+
+    Hledá se v tomto pořadí:
+
+    1. proměnná prostředí ``DLG_HOME`` (testy, dočasné přesměrování),
+    2. přenosný režim — soubor ``portable.txt`` vedle ``.exe``,
+    3. složka, kterou si uživatel zvolil v Nastavení (ukazatel na ni leží
+       mimo ni, viz :func:`location_path`),
+    4. výchozí umístění v profilu uživatele.
+    """
+
+    override = os.environ.get(ENV_HOME, "").strip()
+    if override:
+        return _as_path(override)
+
+    portable = portable_data_dir()
+    if portable is not None:
+        return portable
+
+    chosen = read_location()
+    if chosen is not None:
+        return chosen
+
+    return default_app_home()
+
+
+def _executable_dir() -> Path | None:
+    """Složka, ve které leží ``.exe``. Mimo zabalený stav vrací ``None``."""
+
+    if not getattr(sys, "frozen", False):
+        return None
+    try:
+        return Path(sys.executable).resolve().parent
+    except OSError:  # pragma: no cover - jen při rozbité instalaci
+        return None
+
+
+def portable_data_dir() -> Path | None:
+    """Složka s daty v přenosném režimu, nebo ``None``.
+
+    Přenosný režim se zapne souborem ``portable.txt`` vedle ``.exe``. Prázdný
+    soubor znamená podsložku ``data`` u programu; jinak se použije cesta
+    zapsaná uvnitř (absolutní i relativní k ``.exe``). Díky tomu jde celý
+    program i s šablonami nosit na flash disku.
+    """
+
+    exe_dir = _executable_dir()
+    if exe_dir is None:
+        return None
+
+    marker = exe_dir / PORTABLE_MARKER_NAME
+    try:
+        if not marker.is_file():
+            return None
+        text = marker.read_text(encoding="utf-8-sig").strip()
+    except OSError:
+        return None
+
+    if not text:
+        return exe_dir / PORTABLE_DATA_DIR_NAME
+
+    candidate = Path(os.path.expandvars(text)).expanduser()
+    if not candidate.is_absolute():
+        candidate = exe_dir / candidate
+    return candidate
+
+
+def anchor_dir() -> Path:
+    """Pevné místo, kam se ukládá ukazatel na složku s daty.
+
+    Leží mimo složku s daty — kdyby byl uvnitř, po přesunu složky by ji
+    aplikace už nenašla.
+    """
+
+    if _is_windows():
+        roaming = os.environ.get("APPDATA", "").strip()
+        base = _as_path(roaming) if roaming else Path.home() / "AppData" / "Roaming"
+        return base / APP_ID
+
+    xdg = os.environ.get("XDG_CONFIG_HOME", "").strip()
+    base = _as_path(xdg) if xdg else Path.home() / ".config"
+    return base / POSIX_DIR_NAME
+
+
+def location_path() -> Path:
+    """Cesta k souboru s ukazatelem na složku s daty."""
+
+    return anchor_dir() / LOCATION_FILE_NAME
+
+
+def read_location() -> Path | None:
+    """Složka s daty zvolená uživatelem, nebo ``None`` pro výchozí umístění."""
+
+    data = read_json(location_path(), default=None, strict=False)
+    if not isinstance(data, Mapping):
+        return None
+    raw = str(data.get("data_dir") or "").strip()
+    if not raw:
+        return None
+    return _as_path(raw)
+
+
+def write_location(path: Path | None) -> None:
+    """Uloží ukazatel na složku s daty. ``None`` znamená návrat k výchozí."""
+
+    if path is None:
+        try:
+            location_path().unlink()
+        except FileNotFoundError:
+            pass
+        except OSError as exc:
+            raise ConfigError(
+                "Volbu složky s daty se nepodařilo zrušit: "
+                f"{_describe_os_error(exc)}."
+            ) from exc
+        return
+
+    write_json_atomic(location_path(), {"data_dir": str(Path(path))})
+
+
+@dataclass(frozen=True)
+class DataHomeStatus:
+    """Kde leží data aplikace a proč zrovna tam — podklad pro Nastavení."""
+
+    path: Path
+    source: str  # "env" | "portable" | "chosen" | "default"
+
+    @property
+    def is_default(self) -> bool:
+        return self.source == "default"
+
+    @property
+    def can_change(self) -> bool:
+        """Přes prostředí a přenosný režim se volba v aplikaci nedá přebít."""
+
+        return self.source in ("chosen", "default")
+
+    @property
+    def description(self) -> str:
+        """Česká věta pro obrazovku Nastavení."""
+
+        if self.source == "env":
+            return (
+                f"Umístění vynucuje proměnná prostředí {ENV_HOME}. "
+                "Dokud je nastavená, volba v aplikaci se neuplatní."
+            )
+        if self.source == "portable":
+            return (
+                "Přenosný režim — data leží u programu, protože vedle něj "
+                f"je soubor {PORTABLE_MARKER_NAME}."
+            )
+        if self.source == "chosen":
+            return "Složku jste zvolili ručně."
+        return "Výchozí umístění v profilu uživatele."
+
+
+def data_home_status() -> DataHomeStatus:
+    """Zjistí, kde data leží a čím je to určené."""
+
+    override = os.environ.get(ENV_HOME, "").strip()
+    if override:
+        return DataHomeStatus(_as_path(override), "env")
+
+    portable = portable_data_dir()
+    if portable is not None:
+        return DataHomeStatus(portable, "portable")
+
+    chosen = read_location()
+    if chosen is not None:
+        return DataHomeStatus(chosen, "chosen")
+
+    return DataHomeStatus(default_app_home(), "default")
+
+
+def _check_writable(path: Path) -> None:
+    """Ověří, že do složky opravdu půjde zapisovat."""
+
+    ensure_dir(path)
+    probe: str | None = None
+    try:
+        handle, probe = tempfile.mkstemp(prefix=".zapis-test-", dir=str(path))
+        os.close(handle)
+    except OSError as exc:
+        raise ConfigError(
+            f"Do složky „{path}“ nejde zapisovat: {_describe_os_error(exc)}."
+        ) from exc
+    finally:
+        if probe is not None:
+            try:
+                os.unlink(probe)
+            except OSError:
+                pass
+
+
+def has_data(path: Path) -> bool:
+    """Leží už v této složce data generátoru?"""
+
+    path = Path(path)
+    templates = path / TEMPLATES_DIR_NAME
+    if templates.is_dir() and any(templates.iterdir()):
+        return True
+    return (path / SETTINGS_FILE_NAME).is_file()
+
+
+def _is_within(child: Path, parent: Path) -> bool:
+    """Leží ``child`` uvnitř ``parent`` (nebo je to tatáž cesta)?"""
+
+    try:
+        child_res = Path(child).resolve()
+        parent_res = Path(parent).resolve()
+    except OSError:  # pragma: no cover - nedostupná síťová cesta
+        child_res, parent_res = Path(child), Path(parent)
+    return child_res == parent_res or parent_res in child_res.parents
+
+
+def set_app_home(target: Path | str | None, *, move_existing: bool = False) -> Path:
+    """Přepne aplikaci na jinou složku s daty.
+
+    ``target=None`` vrátí aplikaci k výchozímu umístění.
+
+    ``move_existing=True`` přestěhuje šablony, nastavení a historii ze
+    současné složky do nové. Stěhování se odmítne, pokud v cílové složce
+    už nějaká data jsou — přepsat cizí šablony by byla nevratná ztráta.
+    """
+
+    status = data_home_status()
+    if not status.can_change:
+        raise ConfigError(
+            "Složku s daty teď nejde změnit. " + status.description
+        )
+
+    if target is None:
+        destination = default_app_home()
+    else:
+        destination = _as_path(str(target))
+
+    source = status.path
+
+    if _is_within(destination, source) and destination != source:
+        raise ConfigError(
+            "Novou složku nelze umístit dovnitř té současné — "
+            "zvolte složku mimo ni."
+        )
+    if _is_within(source, destination) and destination != source:
+        raise ConfigError(
+            "Současná složka s daty leží uvnitř zvolené složky — "
+            "zvolte jinou."
+        )
+
+    _check_writable(destination)
+
+    if move_existing and Path(source).exists() and destination != source:
+        if has_data(destination):
+            raise ConfigError(
+                f"Ve složce „{destination}“ už nějaká data jsou. "
+                "Buď zvolte prázdnou složku, nebo data přebírat nechte "
+                "a ta stávající si přeneste ručně."
+            )
+        for name in DATA_ENTRIES:
+            src_entry = Path(source) / name
+            if not src_entry.exists():
+                continue
+            try:
+                shutil.move(str(src_entry), str(Path(destination) / name))
+            except OSError as exc:
+                raise ConfigError(
+                    f"Položku „{name}“ se nepodařilo přesunout: "
+                    f"{_describe_os_error(exc)}. Data zůstala v původní složce."
+                ) from exc
+
+    write_location(None if destination == default_app_home() else destination)
+    return destination
 
 
 def templates_dir() -> Path:
