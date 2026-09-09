@@ -61,6 +61,7 @@ __all__ = [
     "report_exception",
     "resource_path",
     "sanitize_geometry",
+    "virtual_screen",
     "save_window_state",
     "window_state_path",
 ]
@@ -207,12 +208,18 @@ def sanitize_geometry(
     *,
     screen: tuple[int, int],
     minimum: tuple[int, int] = theme.WINDOW_MIN_SIZE,
+    origin: tuple[int, int] = (0, 0),
 ) -> str:
-    """Ořízne uloženou geometrii tak, aby se okno vešlo na obrazovku.
+    """Ořízne uloženou geometrii tak, aby se okno vešlo na viditelnou plochu.
 
     Vrací prázdný řetězec, když se zápis nedá použít vůbec (poškozený soubor,
     nesmyslné rozměry). Díky tomu se aplikace neotevře mimo viditelnou plochu
     ani menší, než je použitelné minimum — typicky po odpojení druhého monitoru.
+
+    ``origin`` je levý horní roh plochy. U více monitorů nemusí být v nule:
+    monitor nalevo od hlavního má zápornou souřadnici x. Bez toho by se okno
+    z druhého monitoru při každém startu přitáhlo zpátky na hlavní — viz
+    :func:`virtual_screen`.
     """
 
     parsed = parse_geometry(text)
@@ -228,9 +235,46 @@ def sanitize_geometry(
     if x is None or y is None:
         return f"{width}x{height}"
 
-    x = max(0, min(int(x), max(0, screen_w - width)))
-    y = max(0, min(int(y), max(0, screen_h - height)))
+    left, top = int(origin[0]), int(origin[1])
+    x = max(left, min(int(x), left + max(0, screen_w - width)))
+    y = max(top, min(int(y), top + max(0, screen_h - height)))
     return f"{width}x{height}+{x}+{y}"
+
+
+#: Indexy ``GetSystemMetrics`` pro virtuální plochu (všechny monitory dohromady).
+_SM_XVIRTUALSCREEN = 76
+_SM_YVIRTUALSCREEN = 77
+_SM_CXVIRTUALSCREEN = 78
+_SM_CYVIRTUALSCREEN = 79
+
+
+def virtual_screen() -> "tuple[int, int, int, int] | None":
+    """Obdélník plochy přes všechny monitory: ``(x, y, šířka, výška)``.
+
+    Tk plní ``winfo_screenwidth()`` na Windows z ``SM_CXSCREEN``, tedy jen
+    z HLAVNÍHO monitoru. Okno uložené na druhém monitoru (x = 2400) se proto
+    při každém startu ořízlo zpátky na hlavní — a advokát, který má aplikaci
+    trvale vpravo, si ji musel po každém spuštění přetahovat.
+
+    Na jiných systémech (X11 s Xineramou hlásí rovnou celou virtuální plochu)
+    a při jakémkoli selhání vrací ``None`` a použije se hodnota od Tk.
+    """
+
+    if not theme.is_windows():
+        return None
+    try:  # pragma: no cover - běží jen na Windows
+        import ctypes
+
+        metrics = ctypes.windll.user32.GetSystemMetrics  # type: ignore[attr-defined]
+        left = int(metrics(_SM_XVIRTUALSCREEN))
+        top = int(metrics(_SM_YVIRTUALSCREEN))
+        width = int(metrics(_SM_CXVIRTUALSCREEN))
+        height = int(metrics(_SM_CYVIRTUALSCREEN))
+    except Exception:  # noqa: BLE001 - chybějící user32 nesmí zabránit startu
+        return None
+    if width <= 0 or height <= 0:  # pragma: no cover - nesmyslná odpověď
+        return None
+    return (left, top, width, height)
 
 
 def load_window_state(path: Path | None = None) -> dict[str, Any]:
@@ -1021,9 +1065,21 @@ class App(tk.Tk):
         y = max(0, (screen_h - height) // 3)
         return f"{width}x{height}+{x}+{y}"
 
+    def screen_bounds(self) -> tuple[int, int, int, int]:
+        """Viditelná plocha jako ``(x, y, šířka, výška)`` — přes všechny monitory."""
+
+        rect = virtual_screen()
+        if rect is not None:
+            return rect
+        width, height = self.screen_size()
+        return (0, 0, width, height)
+
     def _restore_window_state(self) -> None:
         state = load_window_state()
-        geometry = sanitize_geometry(state.get("geometry", ""), screen=self.screen_size())
+        left, top, width, height = self.screen_bounds()
+        geometry = sanitize_geometry(
+            state.get("geometry", ""), screen=(width, height), origin=(left, top)
+        )
         if not geometry:
             geometry = self.default_geometry()
         try:

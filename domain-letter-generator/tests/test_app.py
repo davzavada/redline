@@ -169,6 +169,51 @@ def test_okno_nastartuje_a_ma_cesky_titulek(app: app_module.App) -> None:
     assert app.minsize() == tuple(theme.WINDOW_MIN_SIZE)
 
 
+def test_okno_zustane_na_druhem_monitoru() -> None:
+    """Regrese: okno se z druhého monitoru vracelo při každém startu na hlavní.
+
+    Tk hlásí na Windows jen rozměry HLAVNÍHO monitoru, takže se uložená pozice
+    x = 2400 ořízla zpátky do jeho šířky. Plocha přes všechny monitory se ale
+    nezačíná v nule — monitor nalevo od hlavního má dokonce zápornou x.
+    """
+
+    # dva monitory vedle sebe, hlavní vlevo: plocha 0..3840
+    assert app_module.sanitize_geometry(
+        "1200x700+2400+300", screen=(3840, 1080), origin=(0, 0)
+    ) == "1200x700+2400+300"
+
+    # monitor NALEVO od hlavního: plocha začíná na -1920
+    assert app_module.sanitize_geometry(
+        "1200x700+-1600+120", screen=(3840, 1080), origin=(-1920, 0)
+    ) == "1200x700+-1600+120"
+
+    # bez druhého monitoru se okno pořád vtáhne zpět na plochu
+    assert app_module.sanitize_geometry(
+        "1200x700+2400+300", screen=(1920, 1080), origin=(0, 0)
+    ) == "1200x700+720+300"
+
+    # a nikdy se nedostane před levý ani horní okraj plochy
+    assert app_module.sanitize_geometry(
+        "1200x700+-5000+-5000", screen=(3840, 1080), origin=(-1920, 0)
+    ) == "1200x700+-1920+0"
+
+
+def test_virtual_screen_mimo_windows_nic_nehlasi(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Na Linuxu/macOS hlásí plochu rovnou Tk — ptát se Windows API nemá smysl."""
+
+    monkeypatch.setattr(theme, "is_windows", lambda: False)
+    assert app_module.virtual_screen() is None
+
+
+def test_screen_bounds_padne_zpet_na_tk(app: app_module.App, monkeypatch) -> None:
+    """Když se virtuální plocha zjistit nedá, použije se hodnota od Tk."""
+
+    monkeypatch.setattr(app_module, "virtual_screen", lambda: None)
+    left, top, width, height = app.screen_bounds()
+    assert (left, top) == (0, 0)
+    assert (width, height) == app.screen_size()
+
+
 def test_upravena_pole_se_promitnou_do_generovat(
     app_se_sablonou: app_module.App, store_se_sablonou: TemplateStore
 ) -> None:

@@ -506,7 +506,11 @@ class GenerateView(ttk.Frame):
         )
         self._build_form()
         self.update_filename()
-        self.update_preview()
+        # Náhled se počítá ve vlákně a doplní se za okamžik. Synchronní výpočet
+        # tady znamenal, že se při startu aplikace rozbalil celý .docx, vyplnil
+        # a převedl na text JEŠTĚ NEŽ se ukázalo okno — u vícestránkové šablony
+        # stovky milisekund, po které uživatel po dvojkliku koukal na plochu.
+        self.schedule_preview(delay=1)
         if self._mapping_warning:
             self.status.error(self._mapping_warning)
         else:
