@@ -263,6 +263,31 @@ def test_bullet_label_is_czech():
     assert "doplnit" in fields[0].label
 
 
+def test_unknown_choice_gets_variant_key():
+    """Nerozpoznaná volba mezi variantami má klíč „varianta“, ne „pole_1“."""
+
+    fields = suggest_fields(
+        scan_of(ph("zrušili registraci Doménového jména / převedli Doménové jméno"))
+    )
+
+    assert fields[0].key == "varianta"
+    assert fields[0].type == "choice"
+    assert len(fields[0].options) == 2
+
+
+def test_unknown_choices_are_numbered_separately_from_plain_fields():
+    fields = suggest_fields(
+        scan_of(
+            ph("§ 8 odst. 2 zákona", order=0),
+            ph("ano / ne", order=1),
+            ph("vlevo / vpravo", order=2),
+            ph("§ 12 odst. 4 zákona", order=3),
+        )
+    )
+
+    assert keys_of(fields) == ["pole_1", "varianta", "varianta_2", "pole_2"]
+
+
 def test_keys_are_unique():
     fields = suggest_fields(
         scan_of(

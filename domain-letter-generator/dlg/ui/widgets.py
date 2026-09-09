@@ -57,12 +57,15 @@ __all__ = [
     "Toolbar",
     "ask_yes_no",
     "busy_cursor",
+    "center_on",
     "format_date",
     "parse_date",
+    "plural_places",
     "run_in_thread",
     "show_error",
     "show_info",
     "show_warning",
+    "shorten",
     "validate_date_text",
 ]
 
@@ -531,6 +534,47 @@ class ScrollableFrame(ttk.Frame):
 # ---------------------------------------------------------------------------
 # combobox s napovídáním
 # ---------------------------------------------------------------------------
+
+
+def center_on(window: tk.Misc, master: tk.Misc | None) -> None:
+    """Vystředí okno nad rodičovským oknem (vodorovně na střed, svisle do třetiny).
+
+    Sdílená pomůcka všech modálních dialogů aplikace. Když okno mezitím zaniklo
+    nebo rodič není widget, nedělá nic — vystředění není důvod ke spadnutí.
+    """
+
+    if not isinstance(master, tk.Misc):
+        return
+    try:
+        window.update_idletasks()
+        top = master.winfo_toplevel()
+        x = top.winfo_rootx() + max(0, (top.winfo_width() - window.winfo_width()) // 2)
+        y = top.winfo_rooty() + max(0, (top.winfo_height() - window.winfo_height()) // 3)
+        window.geometry(f"+{max(0, x)}+{max(0, y)}")
+    except tk.TclError:  # pragma: no cover - okno zaniklo dřív
+        pass
+
+
+def shorten(text: str, limit: int) -> str:
+    """Jednořádkový náhled textu, delší se zkrátí a ukončí výpustkou.
+
+    Sdílená pomůcka pohledů — ať se v každém neopisuje znovu.
+    """
+
+    value = " ".join(str(text or "").replace("\u00a0", " ").split())
+    if len(value) <= limit:
+        return value
+    return value[: max(1, limit - 1)].rstrip() + "\u2026"
+
+
+def plural_places(count: int) -> str:
+    """„1 místo“ / „3 místa“ / „7 míst“ — česká číslovka pro počet míst."""
+
+    if count == 1:
+        return "1 místo"
+    if 2 <= count <= 4:
+        return f"{count} místa"
+    return f"{count} míst"
 
 
 def _fold(text: str) -> str:

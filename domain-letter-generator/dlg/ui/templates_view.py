@@ -286,13 +286,7 @@ class TemplateDetailsDialog(tk.Toplevel):
 
     # -- pomocné -------------------------------------------------------
     def _center_on(self, master: tk.Misc) -> None:
-        try:
-            top = master.winfo_toplevel()
-            x = top.winfo_rootx() + max(0, (top.winfo_width() - self.winfo_width()) // 2)
-            y = top.winfo_rooty() + max(0, (top.winfo_height() - self.winfo_height()) // 3)
-            self.geometry(f"+{max(0, x)}+{max(0, y)}")
-        except tk.TclError:  # pragma: no cover
-            pass
+        widgets.center_on(self, master)
 
     def _on_return(self, event: Any = None) -> str | None:
         # V popisu je Enter obyčejný nový řádek, ne potvrzení dialogu.
@@ -710,7 +704,17 @@ class TemplatesView(ttk.Frame):
 
         widgets.run_in_thread(self, work, self._on_import_done, self._on_import_error)
 
+    def _alive(self) -> bool:
+        """Okno mohlo mezitím zaniknout — výsledek vlákna pak nemá kam doručit."""
+
+        try:
+            return bool(self.winfo_exists())
+        except tk.TclError:  # pragma: no cover - interpret Tk je pryč
+            return False
+
     def _on_import_done(self, meta: TemplateMeta) -> None:
+        if not self._alive():  # pragma: no cover - okno zavřené během nahrávání
+            return
         self._set_busy(False, "")
         self.refresh()
         self.select(meta.id)
@@ -741,6 +745,8 @@ class TemplatesView(ttk.Frame):
             self._on_edit_fields(meta.id)
 
     def _on_import_error(self, exc: BaseException) -> None:
+        if not self._alive():  # pragma: no cover - okno zavřené během nahrávání
+            return
         self._set_busy(False, "")
         self.refresh()
         if isinstance(exc, StoreError):

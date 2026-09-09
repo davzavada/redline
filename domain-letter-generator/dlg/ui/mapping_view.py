@@ -136,13 +136,6 @@ def normalize_key(text: str) -> str:
     return key
 
 
-def _shorten(text: str, limit: int) -> str:
-    value = " ".join(str(text or "").replace(" ", " ").split())
-    if len(value) <= limit:
-        return value
-    return value[: max(1, limit - 1)].rstrip() + "…"
-
-
 def is_meaningful_paragraph(text: str) -> bool:
     """Má odstavec netriviální text? Prázdné a dekorativní odstavce nenabízíme."""
 
@@ -160,14 +153,6 @@ def _part_label(part: str) -> str:
         if name == prefix or (not prefix.endswith(".xml") and name.startswith(prefix)):
             return label
     return name
-
-
-def _plural_places(count: int) -> str:
-    if count == 1:
-        return "1 místo"
-    if 2 <= count <= 4:
-        return f"{count} místa"
-    return f"{count} míst"
 
 
 def _plural_placeholders(count: int) -> str:
@@ -232,7 +217,7 @@ class MappingView(ttk.Frame):
         self._optional: dict[str, OptionalParagraph] = {}
         self._paragraph_rows: list[dict[str, Any]] = []
         self._snapshot: dict[str, Any] = {}
-        self._selected_key: str = ""
+        self._selected_index: int = -1
         self._loading = False
 
         self.columnconfigure(0, weight=1)
@@ -499,7 +484,7 @@ class MappingView(ttk.Frame):
             )
             self.pattern_field.set(meta.output_pattern or naming.DEFAULT_PATTERN)
 
-            self._refresh_tree(select_key=self._fields[0].key if self._fields else "")
+            self._refresh_tree(select_index=0)
             self._rebuild_paragraph_rows()
             self._update_pattern_preview()
         finally:
@@ -512,47 +497,91 @@ class MappingView(ttk.Frame):
     # ------------------------------------------------------------------
     # tabulka polí
     # ------------------------------------------------------------------
-    def _refresh_tree(self, select_key: str = "") -> None:
-        previous = select_key or self._selected_key
+    @staticmethod
+    def _iid(index: int) -> str:
+        """Identifikátor řádku je pořadí, ne klíč — klíč se smí měnit i duplikovat."""
+
+        return f"pole{int(index)}"
+
+    def _iid_index(self, iid: str) -> int:
+        text = str(iid or "")
+        if not text.startswith("pole"):
+            return -1
+        try:
+            index = int(text[4:])
+        except ValueError:  # pragma: no cover - cizí iid
+            return -1
+        return index if 0 <= index < len(self._fields) else -1
+
+    @staticmethod
+    def _row_values(spec: FieldSpec) -> tuple[Any, ...]:
+        return (
+            spec.label,
+            spec.key,
+            _TYPE_TO_LABEL.get(spec.type, spec.type),
+            "ano" if spec.required else "ne",
+            len(spec.placeholder_ids),
+        )
+
+    def _refresh_tree(self, select_index: int | None = None) -> None:
+        """Překreslí tabulku a vybere řádek (výchozí je ten dosud vybraný)."""
+
+        target = self._selected_index if select_index is None else int(select_index)
         self.tree.delete(*self.tree.get_children())
-        for spec in self._fields:
-            self.tree.insert(
-                "",
-                "end",
-                iid=spec.key,
-                values=(
-                    spec.label,
-                    spec.key,
-                    _TYPE_TO_LABEL.get(spec.type, spec.type),
-                    "ano" if spec.required else "ne",
-                    len(spec.placeholder_ids),
-                ),
-            )
-        if previous and self.tree.exists(previous):
-            self.tree.selection_set(previous)
-            self.tree.see(previous)
-        elif self._fields:
-            self.tree.selection_set(self._fields[0].key)
-        else:
-            self._selected_key = ""
-            self._set_editor_enabled(False)
+        for index, spec in enumerate(self._fields):
+            self.tree.insert("", "end", iid=self._iid(index), values=self._row_values(spec))
+
+        if not self._fields:
+            self._selected_index = -1
+            self._load_editor(None)
+            return
+
+        self._select_row(max(0, min(target, len(self._fields) - 1)))
+
+    def _select_row(self, index: int) -> None:
+        """Vybere řádek a naplní jím editační panel."""
+
+        self._selected_index = index
+        iid = self._iid(index)
+        if self.tree.exists(iid):
+            self.tree.selection_set(iid)
+            self.tree.see(iid)
+        self._load_editor(self._fields[index])
 
     def _on_tree_select(self, _event: Any = None) -> None:
         if self._loading:
             return
         selection = self.tree.selection()
-        new_key = selection[0] if selection else ""
-        if new_key == self._selected_key:
+        index = self._iid_index(selection[0]) if selection else -1
+        if index < 0 or index == self._selected_index:
             return
         self._flush_editor()
-        self._selected_key = new_key
-        self._load_editor(self.field_by_key(new_key))
+        self._select_row(index)
 
     def field_by_key(self, key: str) -> FieldSpec | None:
         for spec in self._fields:
             if spec.key == key:
                 return spec
         return None
+
+    def selected_field(self) -> FieldSpec | None:
+        """Pole, které je právě vybrané v tabulce."""
+
+        if 0 <= self._selected_index < len(self._fields):
+            return self._fields[self._selected_index]
+        return None
+
+    def select_field(self, key: str) -> bool:
+        """Vybere pole podle klíče a načte ho do editačního panelu."""
+
+        if self._index_of(key) < 0:
+            return False
+        self._flush_editor()
+        index = self._index_of(key)
+        if index < 0:  # pragma: no cover - klíč se mezitím změnil
+            return False
+        self._select_row(index)
+        return True
 
     def _index_of(self, key: str) -> int:
         for index, spec in enumerate(self._fields):
@@ -642,12 +671,12 @@ class MappingView(ttk.Frame):
                         text.insert("end", f"{pid} — v šabloně už není\n", ("kontext",))
                         continue
                     part = _part_label(placeholder.part)
-                    head = _shorten(placeholder.raw, 90)
+                    head = widgets.shorten(placeholder.raw, 90)
                     text.insert("end", head, ("raw",))
                     if part:
                         text.insert("end", f"  ({part})", ("kontext",))
                     text.insert("end", "\n")
-                    context = _shorten(placeholder.context, CONTEXT_PREVIEW_CHARS)
+                    context = widgets.shorten(placeholder.context, CONTEXT_PREVIEW_CHARS)
                     if context and context != head:
                         text.insert("end", f"    {context}\n", ("kontext",))
             text.configure(state="disabled")
@@ -657,39 +686,24 @@ class MappingView(ttk.Frame):
     def _flush_editor(self) -> None:
         """Zapíše obsah editačního panelu do právě vybraného pole."""
 
-        if self._loading or not self._selected_key:
+        if self._loading:
             return
-        spec = self.field_by_key(self._selected_key)
+        spec = self.selected_field()
         if spec is None:
             return
 
         spec.label = self.label_field.get().strip()
         spec.key = self.key_field.get().strip()
         spec.type = _LABEL_TO_TYPE.get(self.type_field.get(), spec.type)
-        spec.options = [line.strip() for line in self.options_field.get().splitlines() if line.strip()]
+        spec.options = [
+            line.strip() for line in self.options_field.get().splitlines() if line.strip()
+        ]
         spec.default = self.default_field.get()
         spec.required = bool(self.required_var.get())
 
-        if spec.key and spec.key != self._selected_key:
-            # iid v tabulce je klíč pole — po přejmenování se musí překreslit
-            self._selected_key = spec.key
-            self._refresh_tree(select_key=spec.key)
-        else:
-            self._update_tree_row(spec)
-
-    def _update_tree_row(self, spec: FieldSpec) -> None:
-        if not self.tree.exists(spec.key):
-            return
-        self.tree.item(
-            spec.key,
-            values=(
-                spec.label,
-                spec.key,
-                _TYPE_TO_LABEL.get(spec.type, spec.type),
-                "ano" if spec.required else "ne",
-                len(spec.placeholder_ids),
-            ),
-        )
+        iid = self._iid(self._selected_index)
+        if self.tree.exists(iid):
+            self.tree.item(iid, values=self._row_values(spec))
 
     # ------------------------------------------------------------------
     # pořadí, slučování, rozdělení
@@ -703,18 +717,20 @@ class MappingView(ttk.Frame):
             return False
         self._fields[index], self._fields[target] = self._fields[target], self._fields[index]
         self._renumber()
-        self._refresh_tree(select_key=key)
+        self._refresh_tree(select_index=target)
         return True
 
-    def move_selected_up(self) -> None:
+    def _move_selected(self, delta: int, edge: str) -> None:
         self._flush_editor()
-        if not self.move_field(self._selected_key, -1):
-            self.status.set("Pole už je nahoře.")
+        spec = self.selected_field()
+        if spec is None or not self.move_field(spec.key, delta):
+            self.status.set(edge)
+
+    def move_selected_up(self) -> None:
+        self._move_selected(-1, "Pole už je nahoře.")
 
     def move_selected_down(self) -> None:
-        self._flush_editor()
-        if not self.move_field(self._selected_key, +1):
-            self.status.set("Pole už je dole.")
+        self._move_selected(+1, "Pole už je dole.")
 
     def merge_fields(self, key: str, other_key: str) -> bool:
         """Pole ``key`` převezme místa pole ``other_key``; to se zruší."""
@@ -736,14 +752,12 @@ class MappingView(ttk.Frame):
             target.default = source.default
         del self._fields[other]
         self._renumber()
-        self._selected_key = target.key
-        self._refresh_tree(select_key=target.key)
-        self._load_editor(target)
+        self._refresh_tree(select_index=index - 1 if other < index else index)
         return True
 
     def merge_selected(self) -> None:
         self._flush_editor()
-        spec = self.field_by_key(self._selected_key)
+        spec = self.selected_field()
         if spec is None:
             return
         others = [f for f in self._fields if f.key != spec.key]
@@ -756,7 +770,7 @@ class MappingView(ttk.Frame):
         if self.merge_fields(spec.key, chosen):
             self.status.set(
                 f"Pole „{spec.label or spec.key}“ teď vyplní "
-                f"{_plural_places(len(spec.placeholder_ids))}."
+                f"{widgets.plural_places(len(spec.placeholder_ids))}."
             )
 
     def _ask_merge_target(self, spec: FieldSpec, others: Sequence[FieldSpec]) -> str:
@@ -848,28 +862,26 @@ class MappingView(ttk.Frame):
             label = spec.label if position == 1 else f"{spec.label} ({position})"
             placeholder = self._placeholders.get(pid)
             if placeholder is not None and position > 1:
-                context = _shorten(placeholder.context or placeholder.raw, 60)
+                context = widgets.shorten(placeholder.context or placeholder.raw, 60)
                 if context:
                     label = f"{spec.label} ({position}) — {context}"
             parts.append(
                 replace(
                     FieldSpec.from_dict(spec.to_dict()),
                     key=new_key,
-                    label=_shorten(label, 80),
+                    label=widgets.shorten(label, 80),
                     placeholder_ids=[pid],
                 )
             )
 
         self._fields[index : index + 1] = parts
         self._renumber()
-        self._selected_key = parts[0].key
-        self._refresh_tree(select_key=parts[0].key)
-        self._load_editor(parts[0])
+        self._refresh_tree(select_index=index)
         return [p.key for p in parts]
 
     def split_selected(self) -> None:
         self._flush_editor()
-        spec = self.field_by_key(self._selected_key)
+        spec = self.selected_field()
         if spec is None:
             return
         if len(spec.placeholder_ids) < 2:
@@ -922,7 +934,7 @@ class MappingView(ttk.Frame):
                 master=self, value=(existing.included_by_default if existing else True)
             )
 
-            preview = _shorten(paragraph.text, PARAGRAPH_PREVIEW_CHARS) or "(prázdný odstavec)"
+            preview = widgets.shorten(paragraph.text, PARAGRAPH_PREVIEW_CHARS) or "(prázdný odstavec)"
             part = _part_label(paragraph.part)
             caption = preview if not part else f"[{part}] {preview}"
 
@@ -989,7 +1001,7 @@ class MappingView(ttk.Frame):
             if not record["enabled"].get():
                 continue
             paragraph = record["paragraph"]
-            label = record["label"].get().strip() or _shorten(record["preview"], 60)
+            label = record["label"].get().strip() or widgets.shorten(record["preview"], 60)
             out.append(
                 OptionalParagraph(
                     paragraph_id=paragraph.id,
@@ -1062,17 +1074,18 @@ class MappingView(ttk.Frame):
         """Vybere v tabulce první pole s vadným klíčem, ať je vidět, kde je chyba."""
 
         seen: set[str] = set()
-        for spec in self._fields:
+        for index, spec in enumerate(self._fields):
             key = spec.key.strip()
             bad = (not key) or (not KEY_RE.match(key)) or (key in seen)
             seen.add(key)
             if bad or not spec.label.strip():
-                if self.tree.exists(spec.key):
-                    self.tree.selection_set(spec.key)
-                    self.tree.see(spec.key)
-                self._selected_key = spec.key
-                self._load_editor(spec)
-                self.key_field.set_error("Klíč musí být jedinečný a ve tvaru [a-z0-9_].")
+                self._select_row(index)
+                if bad:
+                    self.key_field.set_error(
+                        "Klíč musí být jedinečný a jen z malých písmen, číslic a podtržítek."
+                    )
+                else:
+                    self.label_field.set_error("Popisek nesmí být prázdný.")
                 return
 
     def build_meta(self) -> TemplateMeta | None:

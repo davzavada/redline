@@ -149,6 +149,37 @@ def _check_docx(data: bytes, source_name: str) -> None:
         )
 
 
+def _meta_from_data(data: Any, fallback_id: str) -> TemplateMeta:
+    """Z JSONu udělá :class:`TemplateMeta` i tehdy, když má nesmyslné typy.
+
+    Ručně upravený nebo poškozený ``meta.json`` (``"fields": "text"``,
+    ``"optional_paragraphs": 7``) nesmí shodit celý seznam šablon — v takovém
+    případě se vezme aspoň to, co jde přečíst, a zbytek se zahodí.
+    """
+
+    if not isinstance(data, Mapping):
+        raise StoreError(f"Metadata šablony „{fallback_id}“ jsou poškozená.")
+    try:
+        meta = TemplateMeta.from_dict(data)
+    except (AttributeError, TypeError, ValueError):
+        cleaned = {
+            k: v
+            for k, v in data.items()
+            if k not in ("fields", "optional_paragraphs", "tags")
+        }
+        try:
+            meta = TemplateMeta.from_dict(cleaned)
+        except (AttributeError, TypeError, ValueError) as exc:
+            raise StoreError(
+                f"Metadata šablony „{fallback_id}“ jsou poškozená ({exc})."
+            ) from exc
+    if not meta.id:
+        meta.id = fallback_id
+    if not meta.name.strip():
+        meta.name = meta.id
+    return meta
+
+
 def _scan_docx(path: Path) -> ScanResult:
     """Zavolá skutečný engine. Import je líný — kvůli startu aplikace i testům."""
 
@@ -172,6 +203,12 @@ class TemplateStore:
     def __init__(self, root: Path | None = None) -> None:
         self.root = Path(root) if root is not None else config.templates_dir()
         self._scan_cache: dict[str, tuple[int, int, ScanResult]] = {}
+
+    def rebind(self, root: Path | None = None) -> None:
+        """Přepne knihovnu na jinou složku (uživatel změnil umístění dat)."""
+
+        self.root = Path(root) if root is not None else config.templates_dir()
+        self._scan_cache.clear()
 
     # -- cesty ---------------------------------------------------------
     def _validate_id(self, template_id: str) -> str:
@@ -220,11 +257,11 @@ class TemplateStore:
             except ConfigError:
                 # poškozenou šablonu jen přeskočíme, aplikace musí jet dál
                 continue
-            if not isinstance(data, Mapping):
+            try:
+                meta = _meta_from_data(data, entry.name)
+            except StoreError:
+                # poškozenou šablonu jen přeskočíme, aplikace musí jet dál
                 continue
-            meta = TemplateMeta.from_dict(data)
-            if not meta.id:
-                meta.id = entry.name
             items.append(meta)
 
         items.sort(key=_sort_key)
@@ -238,10 +275,7 @@ class TemplateStore:
             raise StoreError(str(exc)) from exc
         if not isinstance(data, Mapping):
             raise TemplateNotFound(f"Šablona „{template_id}“ nebyla nalezena.")
-        meta = TemplateMeta.from_dict(data)
-        if not meta.id:
-            meta.id = self._validate_id(template_id)
-        return meta
+        return _meta_from_data(data, self._validate_id(template_id))
 
     def read_docx(self, template_id: str) -> bytes:
         path = self.docx_path(template_id)
@@ -274,7 +308,14 @@ class TemplateStore:
         if cached is not None and (cached[0], cached[1]) == stamp:
             return cached[2]
 
-        result = _scan_docx(path)
+        try:
+            result = _scan_docx(path)
+        except StoreError:
+            raise
+        except Exception as exc:  # chyba enginu — ať uživatel ví, co se stalo
+            raise StoreError(
+                f"Šablonu „{template_id}“ se nepodařilo zpracovat: {exc}"
+            ) from exc
         self._scan_cache[template_id] = (stamp[0], stamp[1], result)
         return result
 
@@ -461,6 +502,12 @@ class ValueHistory:
         self.path = Path(path) if path is not None else config.history_path()
         self.limit = max(1, int(limit))
         self._values: dict[str, list[str]] | None = None
+
+    def rebind(self, path: Path | None = None) -> None:
+        """Přepne historii na jiný soubor (uživatel změnil umístění dat)."""
+
+        self.path = Path(path) if path is not None else config.history_path()
+        self._values = None
 
     # -- načtení / uložení --------------------------------------------
     def _load(self) -> dict[str, list[str]]:

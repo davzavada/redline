@@ -13,7 +13,7 @@ from __future__ import annotations
 import re
 import unicodedata
 from dataclasses import dataclass
-from typing import Iterable, Mapping, Sequence
+from typing import Mapping, Sequence
 
 from .models import FieldSpec, OptionalParagraph, Placeholder, ScanResult
 
@@ -403,10 +403,19 @@ def suggest_fields(scan: ScanResult) -> list[FieldSpec]:
         context = next((m.context for m in members if m.context), "")
         rule = guess_rule(first.inner, context, first.kind, previous_key)
 
+        ftype = _field_type(members, rule)
+        options = _options_of(members) if ftype == "choice" else []
+
         if rule is not None:
             base_key = rule.key
             base_label = rule.label
             previous_key = rule.key
+        elif options:
+            # Nerozpoznaná volba mezi variantami ("[A / B]"). Klíč „pole_3“ by
+            # uživateli nic neřekl, „varianta“ aspoň napoví, oč jde.
+            base_key = "varianta"
+            base_label = _label_from_inner(first.inner)
+            previous_key = ""
         else:
             unknown_index += 1
             base_key = f"pole_{unknown_index}"
@@ -415,9 +424,6 @@ def suggest_fields(scan: ScanResult) -> list[FieldSpec]:
 
         key, duplicate = _unique(base_key, used_keys)
         label = base_label if duplicate == 1 else f"{base_label} ({duplicate})"
-
-        ftype = _field_type(members, rule)
-        options = _options_of(members) if ftype == "choice" else []
 
         help_parts: list[str] = []
         if rule is not None and rule.help:
@@ -472,9 +478,3 @@ def apply_fields(
         for pid in spec.placeholder_ids:
             out[pid] = value
     return out
-
-
-def field_keys(fields: Iterable[FieldSpec]) -> list[str]:
-    """Pomůcka pro UI: klíče polí v jejich pořadí."""
-
-    return [f.key for f in fields]

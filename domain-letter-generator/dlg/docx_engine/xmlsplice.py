@@ -19,6 +19,8 @@ from __future__ import annotations
 import xml.parsers.expat
 from typing import Iterable, Iterator, Sequence
 
+from .parts import DocxError
+
 __all__ = [
     "XmlError",
     "Node",
@@ -32,8 +34,14 @@ __all__ = [
 ]
 
 
-class XmlError(ValueError):
-    """Chyba při čtení nebo úpravě XML části dokumentu."""
+class XmlError(DocxError, ValueError):
+    """Chyba při čtení nebo úpravě XML části dokumentu.
+
+    Dědí z :class:`~dlg.docx_engine.parts.DocxError`, aby volajícímu stačilo
+    ošetřit jedinou výjimku enginu — poškozené XML uvnitř jinak platného ZIPu
+    je z pohledu uživatele totéž jako nečitelný .docx. ``ValueError`` zůstává
+    kvůli zpětné kompatibilitě.
+    """
 
 
 _LT = 0x3C  # <
