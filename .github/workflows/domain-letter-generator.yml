@@ -101,8 +101,15 @@ jobs:
       run:
         working-directory: domain-letter-generator
     steps:
+      # Pozor: v repozitáři leží soubory, jejichž názvy obsahují dvojtečku
+      # (migrated_prompt_history/prompt_…T09:40:38.228Z.json). Windows takový
+      # název neumí vytvořit a celý checkout na něm spadne. Bereme proto jen
+      # podsložku s aplikací — na build stejně nic jiného nepotřebujeme.
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          sparse-checkout: domain-letter-generator
+          sparse-checkout-cone-mode: true
 
       - name: Python ${{ env.PYTHON_VERSION }}
         uses: actions/setup-python@v5
